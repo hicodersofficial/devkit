@@ -1,16 +1,16 @@
-# tools
+# devkit
 
 A personal collection of small, daily-use developer/productivity tools — CLI
 utilities and scripts that speed up my own programming workflow. Each tool is
 self-contained and can be launched from anywhere via a thin `.bat` shim.
 
-`bin/` is on the user `PATH` (entry: `C:\Users\hicod\tools\bin`), so every shim
+`bin/` is on the user `PATH` (entry: `C:\Users\hicod\devkit\bin`), so every shim
 there is runnable by name from any shell.
 
 ## Layout
 
 ```
-tools/
+devkit/
 ├── bin/           # launcher shims — this folder is on PATH
 │   └── egp.bat
 ├── pkg/           # the actual tool source — one file (or folder) per tool
