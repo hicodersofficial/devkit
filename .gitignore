@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Bun
+bun.lockb
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs / env
+*.log
+.env
+.env.local

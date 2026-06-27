@@ -1,0 +1,13 @@
+{
+  "name": "tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Personal collection of daily-use developer CLI tools",
+  "type": "module",
+  "scripts": {
+    "egp": "bun pkg/egp.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
