@@ -1,13 +1,52 @@
 {
-  "name": "devkit",
+  "name": "@hicoders/devkit",
   "version": "1.0.0",
-  "private": true,
-  "description": "Personal collection of daily-use developer CLI tools",
+  "description": "A terminal toolbelt of small, daily-use developer tools (killport, launch, ...) with a unified TUI hub.",
   "type": "module",
+  "license": "MIT",
+  "author": "hicoders (https://www.npmjs.com/~hicoders)",
+  "keywords": [
+    "cli",
+    "tui",
+    "terminal",
+    "toolbelt",
+    "developer-tools",
+    "killport",
+    "launcher",
+    "opentui",
+    "bun"
+  ],
+  "bin": {
+    "devkit": "pkg/tui/devkit.tsx",
+    "killport": "pkg/tui/killport.tsx",
+    "launch": "pkg/tui/launch.tsx"
+  },
+  "files": [
+    "pkg",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
   "scripts": {
-    "egp": "bun pkg/egp.ts"
+    "devkit": "bun pkg/tui/devkit.tsx",
+    "launch": "bun pkg/tui/launch.tsx",
+    "killport": "bun pkg/tui/killport.tsx",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.17"
+  },
+  "dependencies": {
+    "@opentui/core": "0.0.0-20260616-38ae4bd9",
+    "@opentui/react": "0.0.0-20260616-38ae4bd9",
+    "react": "^19.2.7"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

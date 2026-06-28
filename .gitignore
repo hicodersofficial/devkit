@@ -16,6 +16,10 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Screenshots / scratch
+*.png
+_*.tsx
+
 # Logs / env
 *.log
 .env

@@ -10,7 +10,9 @@
     "skipLibCheck": true,
     "noEmit": true,
     "esModuleInterop": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/react"
   },
-  "include": ["pkg/**/*.ts"]
+  "include": ["pkg/**/*.ts", "pkg/**/*.tsx"]
 }
