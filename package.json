@@ -1,6 +1,6 @@
 {
   "name": "@hicoders/devkit",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A terminal toolbelt of small, daily-use developer tools (killport, launch, ...) with a unified TUI hub.",
   "type": "module",
   "license": "MIT",
@@ -23,6 +23,7 @@
   },
   "files": [
     "pkg",
+    "check-bun.mjs",
     "tsconfig.json",
     "README.md",
     "LICENSE"
@@ -31,6 +32,7 @@
     "bun": ">=1.2.0"
   },
   "scripts": {
+    "preinstall": "node check-bun.mjs",
     "devkit": "bun pkg/tui/devkit.tsx",
     "launch": "bun pkg/tui/launch.tsx",
     "killport": "bun pkg/tui/killport.tsx",

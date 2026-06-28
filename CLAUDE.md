@@ -156,13 +156,19 @@ auto-refresh interval · `y` copy highlighted PID · `r` refresh now · `h` help
 - Core: `pkg/core/killport.ts` (`classify()`, `portInfo()`), `pkg/core/appname.ts`
   (`resolveAppName()`) · UI: `pkg/tui/killport.tsx`
 
-Listeners are gathered from native `netstat -ano` joined with one `Get-Process`
-call, run in parallel (~350ms) — this avoids the slow `Get-NetTCPConnection`
-cmdlet the first version used (~1s).
+Listener discovery is **cross-platform**, dispatched on `process.platform`:
+**Windows** joins native `netstat -ano` with one `Get-Process` (PowerShell) and
+kills via `taskkill /F /T`; **Linux** uses `ss -tlnp` (port + pid + name in one
+shot, exe path from `/proc/<pid>/exe`) and kills via `kill -9`; **macOS** uses
+`lsof -nP -iTCP -sTCP:LISTEN` and `kill -9`. Every external command is spawned
+defensively (`runCapture` swallows a missing-binary throw), so an absent tool
+yields an empty list instead of crashing the picker.
 
-Core Windows processes (System, svchost, lsass, …) are flagged **protected** and
-can't be selected/killed. A process listening on several selected ports is killed
-once (PIDs are de-duplicated).
+Core OS processes (Windows: System, svchost, lsass, …; POSIX: pid 1
+init/systemd/launchd) are flagged **protected** and can't be selected/killed; a
+listener whose owner can't be resolved (e.g. another user's socket in `ss`) shows
+as pid 0 and is likewise protected. A process listening on several selected ports
+is killed once (PIDs are de-duplicated).
 
 ### `launch` — project launcher
 A config-driven launcher for your dev projects (the generic successor to the old

@@ -9,6 +9,10 @@ One hub, clean UI, mouse-friendly, no config to get started.
 bun install -g @hicoders/devkit
 ```
 
+> **Install with [Bun](https://bun.com), not npm.** devkit runs on Bun and relies
+> on Bun to pull in the right native UI binary for your platform. `npm install -g`
+> is not supported and can fail at runtime.
+
 Then just run `devkit` — or jump straight to a tool by name.
 
 ---

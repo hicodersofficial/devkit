@@ -3,14 +3,18 @@
 // Pure logic only: no terminal UI, no console output. The TUI layer
 // (pkg/tui/killport.tsx) and any future GUI both build on these functions.
 //
-// Windows-only. Listeners are gathered from two commands run in parallel:
-//   - native `netstat -ano` (~15ms) for port → pid → state, and
-//   - one `Get-Process` (PowerShell) for pid → name + exe path.
-// Joining them avoids the slow `Get-NetTCPConnection` cmdlet (~500ms) and the
-// per-connection `Get-Process` calls the first version used (~1s total).
-// Kills go through `taskkill`.
+// Cross-platform. How listeners are discovered depends on the OS:
+//   - Windows: native `netstat -ano` (port -> pid) joined with one PowerShell
+//     `Get-Process` (pid -> name + exe path). Kills via `taskkill`.
+//   - Linux:   `ss -tlnp` (port + pid + name in one shot); exe path from
+//     /proc/<pid>/exe. Kills via `kill -9`.
+//   - macOS:   `lsof -nP -iTCP -sTCP:LISTEN` (port + pid + name). Kills via
+//     `kill -9`.
+// All external commands are spawned defensively: a missing binary yields an
+// empty result instead of throwing, so the picker degrades gracefully.
 
 import { homedir } from "node:os";
+import { readlinkSync } from "node:fs";
 
 export type PortCategory = "app" | "service" | "other";
 
@@ -132,11 +136,14 @@ export function classify(p: { port: number; name: string; path: string | null })
   return { category: "other", label };
 }
 
-// PIDs / process names that belong to Windows itself. These are flagged
+// PIDs / process names that belong to the OS itself. These are flagged
 // `system: true` and treated as protected — a "free up my dev port" tool
 // should never invite killing core OS processes (their ports are RPC/SMB/etc).
-const SYSTEM_PIDS = new Set([0, 4]);
+// pid 0/4 are Windows; pid 1 is init/systemd/launchd on POSIX. pid 0 is also
+// the sentinel we use when a listener's owner couldn't be resolved.
+const SYSTEM_PIDS = new Set([0, 1, 4]);
 const SYSTEM_NAMES = new Set([
+  // Windows
   "system",
   "idle",
   "system idle process",
@@ -149,6 +156,10 @@ const SYSTEM_NAMES = new Set([
   "csrss",
   "smss",
   "spoolsv",
+  // POSIX
+  "systemd",
+  "init",
+  "launchd",
 ]);
 
 // One Get-Process call maps every pid to its name + exe path as compact JSON.
@@ -162,14 +173,31 @@ interface ProcRow {
   Path: string | null;
 }
 
+// Run a command and capture its output. A missing executable (Bun.spawn throws
+// "Executable not found in $PATH") is turned into a non-zero result rather than
+// propagating, so a tool absent on this OS just yields no rows.
 async function runCapture(cmd: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, code };
+  try {
+    const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, code };
+  } catch (e) {
+    return { stdout: "", stderr: e instanceof Error ? e.message : String(e), code: -1 };
+  }
+}
+
+// Try each command in turn, returning the first that runs (exit code 0). Used to
+// probe alternative binary locations (e.g. ss in /usr/sbin vs /usr/bin).
+async function firstCapture(cmds: string[][]): Promise<string> {
+  for (const cmd of cmds) {
+    const r = await runCapture(cmd);
+    if (r.code === 0) return r.stdout;
+  }
+  return "";
 }
 
 function isSystem(pid: number, name: string): boolean {
@@ -212,28 +240,130 @@ function parseProcs(out: string): Map<number, { name: string; path: string | nul
   return map;
 }
 
-/** All TCP ports currently in the LISTEN state, sorted by port then pid. */
-export async function listListeners(): Promise<Listener[]> {
-  // Run the fast native port scan and the process lookup concurrently.
-  // Plain `netstat -ano` (no `-p TCP`!) is used on purpose: `-p TCP` lists only
-  // IPv4, dropping IPv6-only listeners like Vite/Node on [::1]. Both IPv4 and
-  // IPv6 TCP rows are labelled "TCP" by netstat, so the parser handles both.
+// A raw listener row before classification: just where + who.
+interface RawListener {
+  port: number;
+  pid: number;
+  name: string;
+  path: string | null;
+}
+
+// ---- Windows: netstat -ano joined with one Get-Process ----
+async function collectWindows(): Promise<RawListener[]> {
+  // Plain `netstat -ano` (no `-p TCP`!) on purpose: `-p TCP` lists only IPv4,
+  // dropping IPv6-only listeners like Vite/Node on [::1]. Both IPv4 and IPv6 TCP
+  // rows are labelled "TCP" by netstat, so the parser handles both.
   const [net, procs] = await Promise.all([
     runCapture(["netstat", "-ano"]).then((r) => parseNetstat(r.stdout)),
     runCapture(["powershell", "-NoProfile", "-NonInteractive", "-Command", PS_PROCS]).then((r) =>
       parseProcs(r.stdout),
     ),
   ]);
+  return net.map(({ port, pid }) => {
+    const proc = procs.get(pid);
+    return { port, pid, name: proc?.name ?? "(unknown)", path: proc?.path ?? null };
+  });
+}
+
+// ---- Linux: ss -tlnp (port + pid + name); exe path from /proc/<pid>/exe ----
+function readExe(pid: number): string | null {
+  try {
+    return readlinkSync(`/proc/${pid}/exe`);
+  } catch {
+    return null;
+  }
+}
+
+// ss rows: `LISTEN 0 511 0.0.0.0:3000 0.0.0.0:* users:(("node",pid=1234,fd=20))`
+// Columns: State Recv-Q Send-Q Local Peer [Process]. The Process column may hold
+// several ("name",pid=N,...) tuples, or be absent for sockets we can't inspect.
+function parseSs(out: string): RawListener[] {
+  const rows: RawListener[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t.startsWith("LISTEN")) continue; // skips the header and non-listening rows
+    const parts = t.split(/\s+/);
+    const local = parts[3] ?? "";
+    const port = Number(local.slice(local.lastIndexOf(":") + 1));
+    if (!Number.isInteger(port)) continue;
+    const procPart = parts.slice(5).join(" ");
+    const matches = [...procPart.matchAll(/"([^"]+)",pid=(\d+)/g)];
+    if (matches.length === 0) {
+      rows.push({ port, pid: 0, name: "(unknown)", path: null }); // owner not visible
+    } else {
+      for (const m of matches) {
+        const pid = Number(m[2]);
+        rows.push({ port, pid, name: m[1]!, path: readExe(pid) });
+      }
+    }
+  }
+  return rows;
+}
+
+async function collectLinux(): Promise<RawListener[]> {
+  // ss ships with iproute2 but isn't always on a non-login PATH; probe the usual
+  // locations. (We intentionally don't fall back to the deprecated net-tools
+  // `netstat`, which is absent on many modern distros.)
+  const out = await firstCapture([
+    ["ss", "-tlnp"],
+    ["/usr/sbin/ss", "-tlnp"],
+    ["/sbin/ss", "-tlnp"],
+    ["/usr/bin/ss", "-tlnp"],
+  ]);
+  return parseSs(out);
+}
+
+// ---- macOS: lsof ----
+// lsof rows: `node 1234 user 20u IPv4 0x.. 0t0 TCP *:3000 (LISTEN)`. The address
+// is the token right before "(LISTEN)"; COMMAND/PID are the first two columns.
+function parseLsof(out: string): RawListener[] {
+  const rows: RawListener[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("COMMAND")) continue;
+    const parts = t.split(/\s+/);
+    const pid = Number(parts[1]);
+    if (!Number.isInteger(pid)) continue;
+    const li = parts.indexOf("(LISTEN)");
+    const addr = (li > 0 ? parts[li - 1] : parts[parts.length - 1]) ?? "";
+    const port = Number(addr.slice(addr.lastIndexOf(":") + 1));
+    if (!Number.isInteger(port)) continue;
+    rows.push({ port, pid, name: parts[0]!, path: null });
+  }
+  return rows;
+}
+
+async function collectDarwin(): Promise<RawListener[]> {
+  const out = await firstCapture([
+    ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+    ["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+  ]);
+  return parseLsof(out);
+}
+
+async function collectListeners(): Promise<RawListener[]> {
+  switch (process.platform) {
+    case "win32":
+      return collectWindows();
+    case "linux":
+      return collectLinux();
+    case "darwin":
+      return collectDarwin();
+    default:
+      return [];
+  }
+}
+
+/** All TCP ports currently in the LISTEN state, sorted by port then pid. */
+export async function listListeners(): Promise<Listener[]> {
+  const raw = await collectListeners();
 
   const seen = new Set<string>();
   const listeners: Listener[] = [];
-  for (const { port, pid } of net) {
+  for (const { port, pid, name, path } of raw) {
     const key = `${port}:${pid}`;
     if (seen.has(key)) continue; // collapse IPv4 + IPv6 duplicates of the same socket
     seen.add(key);
-    const proc = procs.get(pid);
-    const name = proc?.name ?? "(unknown)";
-    const path = proc?.path ?? null;
     const { category, label } = classify({ port, name, path });
     listeners.push({
       port,
@@ -254,11 +384,16 @@ export async function listenersForPort(port: number): Promise<Listener[]> {
   return (await listListeners()).filter((l) => l.port === port);
 }
 
-/** Force-kill a process (and its child tree) by PID via taskkill. */
+/** Force-kill a process by PID — `taskkill /F /T` on Windows (kills the tree),
+ *  `kill -9` on POSIX. */
 export async function killPid(pid: number): Promise<KillResult> {
-  const { stderr, code } = await runCapture(["taskkill", "/PID", String(pid), "/F", "/T"]);
+  const cmd =
+    process.platform === "win32"
+      ? ["taskkill", "/PID", String(pid), "/F", "/T"]
+      : ["kill", "-9", String(pid)];
+  const { stderr, code } = await runCapture(cmd);
   if (code === 0) return { pid, ok: true };
-  return { pid, ok: false, error: stderr.trim() || `taskkill exited with code ${code}` };
+  return { pid, ok: false, error: stderr.trim() || `kill exited with code ${code}` };
 }
 
 /** Parse CLI args into a unique, sorted list of valid port numbers (1-65535). */
