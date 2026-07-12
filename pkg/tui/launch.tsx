@@ -194,18 +194,26 @@ const EDIT_MENU: MenuItem[] = [
   { id: "back", label: "Back", desc: "return to the project list" },
 ];
 
-export function LaunchScreen({ onChoose }: { onChoose: (cmds: Command[] | null) => void }) {
+export function LaunchScreen({
+  onChoose,
+  initialProject = null,
+}: {
+  onChoose: (cmds: Command[] | null) => void;
+  /** Open straight on this project's command picker (the `a` page) instead of the
+   *  project list — used by `launch <name> -a`. Esc still falls back to the list. */
+  initialProject?: Project | null;
+}) {
   const theme = useTheme();
   const [cfg, setCfg] = useState(() => loadLaunch());
   // Raw scanned projects (expensive filesystem read) - refreshed only on mount,
   // `r`, and structural changes (add/edit/delete/scan roots). Pin/reorder/sort
   // never re-scan; they just re-order this list in memory, so they're instant.
   const [raw, setRaw] = useState<Project[]>(() => scanProjects());
-  const [mode, setMode] = useState<Mode>("list");
+  const [mode, setMode] = useState<Mode>(initialProject ? "run" : "list");
   const [showHelp, setShowHelp] = useState(false);
   const [status, setStatus] = useState("");
   const [seq, setSeq] = useState(0); // bumped on transitions to remount TextPrompt
-  const [target, setTarget] = useState<Project | null>(null);
+  const [target, setTarget] = useState<Project | null>(initialProject);
   const [scanTarget, setScanTarget] = useState<ScanRoot | null>(null);
   const [draft, setDraft] = useState<Draft>({ name: "", commands: [] });
   const [pendingCmd, setPendingCmd] = useState({ label: "", command: "", cwd: "" });
@@ -927,11 +935,14 @@ function Frame({
 
 // ---------- CLI entry ----------
 
-// Mount the interactive picker; on a real selection, hand the terminal to the
-// dev servers and hold it (so a caller's loop can't redraw over the logs); on
-// cancel, return so the caller (e.g. the devkit hub) can show its menu again.
-export async function runLaunchScreen() {
-  const chosen = await mountScreen<Command[] | null>((done) => <LaunchScreen onChoose={done} />);
+// Mount the picker; on a real selection, hand the terminal to the dev servers and
+// hold it (so a caller's loop can't redraw over the logs); on cancel, return so the
+// caller (e.g. the devkit hub) can show its menu again. Pass `initialProject` to
+// open straight on that project's command picker (the `a` page).
+export async function runLaunchScreen(initialProject: Project | null = null) {
+  const chosen = await mountScreen<Command[] | null>((done) => (
+    <LaunchScreen onChoose={done} initialProject={initialProject} />
+  ));
   if (!chosen || !chosen.length) return;
   // Renderer is torn down by now; hand the terminal to the dev servers.
   console.log(`\nStarting ...\n`);
@@ -945,23 +956,35 @@ export async function runLaunch() {
   if (argv.includes("-h") || argv.includes("--help")) {
     console.log(
       [
-        "Usage: launch [name|partial|index]",
+        "Usage: launch [name|partial|index] [-a]",
         "  launch                 interactive picker",
         '  launch "Auth Service"  start that project by full name',
         "  launch auth            ... or by a partial name",
         "  launch 1               ... or by its position in the list",
+        "",
+        "  -a, --ask              pick which scripts to run instead of the",
+        "                         defaults (pre-marked with your last run)",
+        "  launch auth -a         e.g. choose the scripts for a one-off run",
       ].join("\n"),
     );
     return;
   }
 
+  // -a / --ask: don't start the defaults, open the project's command picker.
+  const ask = argv.includes("-a") || argv.includes("--ask");
   const nameArg = argv.find((a) => !a.startsWith("-"));
+
   if (nameArg) {
     const p = resolveProject(nameArg);
     if (!p) {
       console.log(`No project matching "${nameArg}". Known projects:`);
       allProjects().forEach((x, i) => console.log(`  ${i + 1}  ${x.name}`));
       process.exit(1);
+    }
+    if (ask) {
+      // Straight to that project's `a` page; it records the run and starts it.
+      await runLaunchScreen(p);
+      process.exit(0);
     }
     const cmds = defaultCommands(p);
     recordLastRun(p.id, cmds.map((c) => c.label));
@@ -971,6 +994,7 @@ export async function runLaunch() {
     return;
   }
 
+  // Bare `-a` (no project named) just opens the normal picker — `a` works there.
   await runLaunchScreen();
   process.exit(0);
 }

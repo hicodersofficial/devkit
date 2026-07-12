@@ -292,6 +292,11 @@ rescan · `/` filter · `h` help (grouped) · `t` theme · `q`/Esc-Esc quit. Or 
 - `launch <name|partial|index>` — start that project's default command(s), matched
   (via `resolveProject`) by full name, a partial/prefix, or its 1-based position
   in the displayed list (recent sort: `1` = last opened; manual sort: visible top)
+- `launch <name|partial|index> -a` (`--ask`) — instead of starting the defaults,
+  open **that project's command picker** (the same `a` page as in the TUI,
+  pre-marked with your last run else the defaults) and run what you select. Done
+  by passing `initialProject` to `LaunchScreen`, which then starts in its `run`
+  mode rather than `list` — Esc still falls back to the project list.
 - Core: `pkg/core/launch.ts` (+ `pkg/core/manifest.ts`) · UI: `pkg/tui/launch.tsx`
   (text entry via the shared `TextPrompt` component)
 

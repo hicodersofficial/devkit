@@ -41,7 +41,10 @@ Stop `cd`-ing into folders and remembering which script to run.
 
 ```sh
 launch                 # pick a project, press Enter
-launch my-app          # or start it straight away
+launch my-app          # or start it straight away — by name...
+launch app             # ...a partial name...
+launch 1               # ...or its position in the list
+launch my-app -a       # choose which scripts to run this time
 ```
 
 Point `launch` at the folders where your projects live and it finds them all
@@ -51,8 +54,8 @@ automatically — reading `package.json`, `go.mod`, `Cargo.toml`, and
 
 - **Pin** your go-to projects to the top.
 - **Reorder** the list however you like, or sort by what you ran most recently.
-- Press **`a`** to launch a different combo of scripts for a one-off run — it even
-  remembers your last choice.
+- Press **`a`** (or pass `-a`) to launch a different combo of scripts for a one-off
+  run — it even remembers your last choice.
 - Add projects by auto-detecting a folder, or by hand.
 
 ### 🧰 One hub for all of it
