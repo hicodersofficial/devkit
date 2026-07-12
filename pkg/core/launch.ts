@@ -409,6 +409,28 @@ export function allProjects(cfg: LaunchConfig = loadLaunch()): Project[] {
   return orderProjects(scanProjects(cfg), cfg);
 }
 
+/**
+ * Resolve a CLI argument to a project, against the displayed order (pins +
+ * sortMode already applied by allProjects). Accepts, in order of precedence:
+ *   - a 1-based index into the visible list ("1" = the top row; with "recent"
+ *     sort that's the last-opened, with "manual" sort the visible top);
+ *   - an exact (case-insensitive) name;
+ *   - a name prefix;
+ *   - a name substring.
+ */
+export function resolveProject(arg: string, cfg: LaunchConfig = loadLaunch()): Project | null {
+  const ordered = allProjects(cfg);
+  if (/^\d+$/.test(arg)) return ordered[Number(arg) - 1] ?? null;
+  const q = arg.trim().toLowerCase();
+  if (!q) return null;
+  return (
+    ordered.find((p) => p.name.toLowerCase() === q) ??
+    ordered.find((p) => p.name.toLowerCase().startsWith(q)) ??
+    ordered.find((p) => p.name.toLowerCase().includes(q)) ??
+    null
+  );
+}
+
 export function findProject(name: string): Project | null {
   const q = name.toLowerCase();
   return allProjects().find((p) => p.name.toLowerCase() === q) ?? null;

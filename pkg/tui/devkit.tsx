@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 // devkit — the hub. Lists every tool and runs the chosen one.
 //
-// Each tool is launched as a child process (`bun pkg/tui/<tool>.tsx`) with the
-// terminal inherited, so it gets a clean screen and can hand off / take over
-// stdio as needed. When the tool exits, the hub menu comes back. The same tool
-// files run standalone, so `killport` / `launch` work without going through `devkit`.
+// Each tool is mounted in-process (via the same mountScreen renderer loop): the
+// hub tears its own screen down, runs the tool's screen, and shows the menu again
+// when the tool returns. Running in-process (not as a child) is what keeps raw
+// keyboard/mouse working on Windows. The same tool files run standalone too, so
+// `killport` / `launch` work without going through `devkit`.
 
 import { useState } from "react";
-import { join } from "node:path";
 import { mountScreen } from "./app";
 import { useTheme } from "./theme-context";
 import { Header, ListSelect, Help, type Binding } from "./components";
@@ -64,12 +64,8 @@ export async function runHub() {
   for (;;) {
     const picked = await mountScreen<ToolDef | null>((done) => <DevkitHub onPick={done} />);
     if (!picked) break;
-    const child = Bun.spawn(["bun", join(import.meta.dir, picked.file)], {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    await child.exited;
+    // Renderer is torn down by now; run the tool's screen on a clean terminal.
+    await picked.run();
   }
   process.exit(0);
 }

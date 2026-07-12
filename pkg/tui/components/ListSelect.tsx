@@ -14,14 +14,54 @@
 //   - optional section headers via `sectionOf` (purely decorative — navigation is
 //     unaffected, headers are derived from the already-sorted items)
 // Pass `active={false}` to make it ignore keys (e.g. while a confirm/help shows).
+//
+// VIEWPORT: the window is "scroll-into-view", never cursor-centering. `start`
+// holds still and only moves when the cursor actually leaves the window (then by
+// the minimum, one row). So clicking a visible row, hovering, or an auto-refresh
+// never shift the list — it only scrolls when you wheel, or step off an edge with
+// j/k. (Centering the cursor was the old layout-shift: every cursor change, even
+// a click mid-list, re-centered the window and pulled in a row.)
+//
+// MOUSE: hover is purely visual — it tints the row under the pointer (`hoverBg`,
+// a subtler background than the selected row's `selBg`) and does NOT move the
+// cursor or the viewport, so it can never scroll the list. A SINGLE click moves
+// the cursor and activates the row (equivalent to Enter on it) — there is no
+// double-click. The wheel moves the cursor. Hover/selection are both backgrounds
+// on the row <box> — they repaint existing cells, so the row never changes height.
+// A non-selectable row (isSelectable === false) takes neither: it doesn't tint on
+// hover and a click on it does nothing, so it can't masquerade as clickable.
+//
+// NOTE: because a click activates, there is no longer a "click to just highlight"
+// gesture. Screens whose keys act on the highlighted row (launch's e/d/a/p) are
+// keyboard-driven for that; a click there runs the row instead.
+//
+// SELECTION: the list's subtree is marked non-selectable (see the effect below) so
+// clicking a row doesn't also start OpenTUI's drag text-selection. That's scoped to
+// the list only — text elsewhere on a screen stays selectable and drag-copyable.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/react";
+import type { BoxRenderable, Renderable } from "@opentui/core";
 import { useTheme, useThemeControls } from "../theme-context";
 
 // Drop control chars (incl. CR/LF/Esc) from typed/pasted filter text.
 const printable = (s: string) => s.replace(/[\x00-\x1f]/g, "");
+
+/**
+ * Scroll-into-view: where the visible window should start, given where it started
+ * last render. The window holds still unless the cursor has stepped outside it,
+ * and then moves by the minimum needed to bring the cursor back into view (one
+ * row when stepping off an edge). It is NOT re-centered on the cursor — that's
+ * what made the list shift a row every time the cursor moved (a click mid-list
+ * pulled in a row from the bottom).
+ */
+export function windowStart(prev: number, cur: number, total: number, maxVisible: number): number {
+  let start = Math.min(Math.max(0, prev), Math.max(0, total - maxVisible));
+  if (cur < start) start = cur; // stepped above the window
+  else if (cur >= start + maxVisible) start = cur - maxVisible + 1; // stepped below it
+  return start;
+}
 
 export interface ListSelectProps<T> {
   items: T[];
@@ -84,7 +124,31 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
   const theme = useTheme();
   const { cycle: cycleTheme } = useThemeControls();
 
+  // The list's rows are interactive CONTROLS, not prose — a click on one is an
+  // action. But OpenTUI hit-tests the topmost renderable on left mouse-down and
+  // starts a drag text-selection if it's `selectable`, and TextRenderable defaults
+  // to selectable:true (BoxRenderable is false). So a click landed on the row's
+  // <text> and smeared a selection highlight across it.
+  //
+  // Fix it the way a GUI does — `user-select: none` on the control, not on the whole
+  // app: mark only THIS subtree non-selectable. Text outside the list (headers,
+  // hints, the help page, streamed logs) stays selectable, so drag-to-copy still
+  // works there. Doing it here rather than via a `selectable={false}` prop keeps it
+  // out of every screen's renderRow. No dep array: rows are rebuilt on filter /
+  // refresh / re-sort, and new renderables default back to selectable.
+  const listRef = useRef<BoxRenderable | null>(null);
+  useEffect(() => {
+    const deselect = (r: Renderable) => {
+      r.selectable = false;
+      for (const child of r.getChildren()) deselect(child);
+    };
+    if (listRef.current) deselect(listRef.current);
+  });
+
   const [cursor, setCursor] = useState(0);
+  // Row under the pointer. Purely cosmetic (underline) — deliberately NOT tied to
+  // `cursor`, so moving the mouse can never move the highlight or scroll the list.
+  const [hovered, setHovered] = useState<number | null>(null);
   const [marked, setMarked] = useState<Set<string>>(() => new Set(initialMarked ?? []));
   const [anchor, setAnchor] = useState<number | null>(null);
   const [filtering, setFiltering] = useState(false);
@@ -163,23 +227,24 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
     setCursor(i);
   };
 
-  // Mouse: scroll moves the cursor (clamped, no wrap); a click highlights a row
-  // and a double-click activates it.
+  // Mouse: the wheel moves the cursor (clamped, no wrap); a single click activates
+  // a row (see clickRow).
   const scrollBy = (delta: number) => {
     const n = ref.current.filtered.length;
     if (!n) return;
     setCursor((c) => Math.max(0, Math.min(n - 1, c + delta)));
   };
-  const lastClick = useRef<{ idx: number; at: number }>({ idx: -1, at: 0 });
+  // A single click activates the row (same as moving to it and pressing Enter) —
+  // there is no double-click. The highlight moves first so the row you acted on is
+  // the one left selected.
   const clickRow = (idx: number) => {
+    // A non-selectable row (e.g. a protected system process in killport) is inert:
+    // clicking it must not move the highlight either, or it would look picked and
+    // then do nothing.
+    const item = ref.current.filtered[idx];
+    if (!item || !isSelectable(item)) return;
     setCursor(idx);
-    const now = Date.now();
-    const dbl = lastClick.current.idx === idx && now - lastClick.current.at < 400;
-    lastClick.current = dbl ? { idx: -1, at: 0 } : { idx, at: now };
-    if (dbl) {
-      const item = ref.current.filtered[idx];
-      if (item && isSelectable(item)) onSubmit([item]);
-    }
+    onSubmit([item]);
   };
 
   const toggleMark = () => {
@@ -353,20 +418,24 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
   const headerFor = (id: string) =>
     sectionLabel ? sectionLabel(id, sectionCounts.get(id) ?? 0) : `${id} (${sectionCounts.get(id) ?? 0})`;
 
-  // Viewport windowing around the cursor.
+  // Viewport windowing: scroll-into-view, NOT cursor-centering. `start` persists
+  // across renders and only budges when the cursor steps outside the window — and
+  // then by exactly one row. A click on a visible row, a hover, or an auto-refresh
+  // leaves the window untouched (no layout shift); it scrolls only when you wheel
+  // or walk off an edge with j/k.
   const { height } = useTerminalDimensions();
   const maxVisible = Math.max(3, props.maxVisible ?? height - 11);
   const total = filtered.length;
-  let start = 0;
-  if (total > maxVisible) {
-    start = Math.min(Math.max(0, cur - Math.floor(maxVisible / 2)), total - maxVisible);
-  }
+  const startRef = useRef(0);
+  const start = windowStart(startRef.current, cur, total, maxVisible);
+  startRef.current = start;
   const visible = filtered.slice(start, start + maxVisible);
 
   const selectedCount = effective.size;
 
   return (
     <box
+      ref={listRef}
       style={{ flexDirection: "column" }}
       onMouseScroll={(e) => {
         if (!active) return;
@@ -398,6 +467,11 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
         const selected = idx === cur;
         const k = getKey(item);
         const isMarked = effective.has(k);
+        // A non-selectable row (killport's protected system processes) must never
+        // take the hover affordance — lighting it up read as "clickable", but the
+        // click then did nothing. Inert rows stay inert-looking.
+        const selectable = isSelectable(item);
+        const isHovered = idx === hovered && selectable;
         const prev = i > 0 ? visible[i - 1] : undefined;
         const section = sectionOf?.(item);
         const showHeader =
@@ -408,12 +482,28 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
               <text fg={theme.accentDim}>{headerFor(section!)}</text>
             ) : null}
             <box
-              style={{ flexDirection: "row", backgroundColor: selected ? theme.selBg : undefined }}
+              style={{
+                flexDirection: "row",
+                // Selection (cursor/click) wins over hover. Both are backgrounds on
+                // this box: they repaint existing cells, so neither changes the row's
+                // height — no layout shift as the pointer moves. (A bottom `border`
+                // would look like an underline but costs a whole extra row.)
+                backgroundColor: selected
+                  ? theme.selBg
+                  : isHovered
+                    ? theme.hoverBg
+                    : undefined,
+              }}
               onMouseDown={() => {
                 if (active) clickRow(idx);
               }}
               onMouseOver={() => {
-                if (active) setCursor(idx); // hover moves the highlight to this row
+                // Visual only: never moves the cursor, so the viewport can't shift
+                // while the pointer drifts. Non-selectable rows take no hover.
+                if (active) setHovered(selectable ? idx : null);
+              }}
+              onMouseOut={() => {
+                if (active) setHovered((h) => (h === idx ? null : h));
               }}
             >
               <text fg={selected ? theme.accent : theme.dim}>{selected ? "> " : "  "}</text>

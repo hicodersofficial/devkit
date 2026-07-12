@@ -69,7 +69,7 @@ help.
 
 ## Nice touches
 
-- ⌨️ **Keyboard-first**, but the **mouse works too** — click, hover, scroll, double-click.
+- ⌨️ **Keyboard-first**, but the **mouse works too** — hover, single-click to run, scroll.
 - 🎨 **Themes** — press `t` to cycle; your choice sticks across every tool.
 - 🧠 **Remembers your setup** — pins, order, and preferences persist automatically.
 - ⚡ **Instant** — no build step, snappy native-feeling UI.

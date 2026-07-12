@@ -13,8 +13,9 @@ export interface Theme {
   green: string; // success
   red: string; // danger
   yellow: string; // warning / confirm
-  selBg: string; // highlighted-row background
+  selBg: string; // highlighted-row background (the cursor / clicked row)
   selFg: string; // highlighted-row text
+  hoverBg: string; // row under the mouse — a subtler tint than selBg
 }
 
 export const THEMES: Theme[] = [
@@ -30,6 +31,7 @@ export const THEMES: Theme[] = [
     yellow: "#E5C07B",
     selBg: "#293356",
     selFg: "#FFFFFF",
+    hoverBg: "#1B2138",
   },
   {
     name: "matrix",
@@ -43,6 +45,7 @@ export const THEMES: Theme[] = [
     yellow: "#D7D75B",
     selBg: "#143314",
     selFg: "#EAFFEA",
+    hoverBg: "#0D1F0D",
   },
   {
     name: "amber",
@@ -56,6 +59,7 @@ export const THEMES: Theme[] = [
     yellow: "#E5C07B",
     selBg: "#3A2E14",
     selFg: "#FFF6E6",
+    hoverBg: "#241D0D",
   },
   {
     name: "rose",
@@ -69,6 +73,7 @@ export const THEMES: Theme[] = [
     yellow: "#E5C07B",
     selBg: "#3A1428",
     selFg: "#FFF0F6",
+    hoverBg: "#240C19",
   },
   {
     name: "mono",
@@ -82,6 +87,7 @@ export const THEMES: Theme[] = [
     yellow: "#CCCCCC",
     selBg: "#333333",
     selFg: "#FFFFFF",
+    hoverBg: "#1F1F1F",
   },
 ];
 

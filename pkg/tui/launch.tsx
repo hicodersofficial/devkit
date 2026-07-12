@@ -40,7 +40,7 @@ import {
   suggestName,
   newId,
   newCommand,
-  findProject,
+  resolveProject,
   startCommands,
   type Command,
   type Project,
@@ -927,14 +927,29 @@ function Frame({
 
 // ---------- CLI entry ----------
 
+// Mount the interactive picker; on a real selection, hand the terminal to the
+// dev servers and hold it (so a caller's loop can't redraw over the logs); on
+// cancel, return so the caller (e.g. the devkit hub) can show its menu again.
+export async function runLaunchScreen() {
+  const chosen = await mountScreen<Command[] | null>((done) => <LaunchScreen onChoose={done} />);
+  if (!chosen || !chosen.length) return;
+  // Renderer is torn down by now; hand the terminal to the dev servers.
+  console.log(`\nStarting ...\n`);
+  for (const c of chosen) console.log(`> ${c.label}: ${c.command}  (${c.cwd})`);
+  startCommands(chosen); // wires SIGINT -> process.exit(0)
+  await new Promise<void>(() => {}); // hold the terminal until Ctrl-C
+}
+
 export async function runLaunch() {
   const argv = process.argv.slice(2);
   if (argv.includes("-h") || argv.includes("--help")) {
     console.log(
       [
-        "Usage: launch [name]",
-        "  launch          interactive picker",
-        "  launch <name>   start that project's default command(s)",
+        "Usage: launch [name|partial|index]",
+        "  launch                 interactive picker",
+        '  launch "Auth Service"  start that project by full name',
+        "  launch auth            ... or by a partial name",
+        "  launch 1               ... or by its position in the list",
       ].join("\n"),
     );
     return;
@@ -942,10 +957,10 @@ export async function runLaunch() {
 
   const nameArg = argv.find((a) => !a.startsWith("-"));
   if (nameArg) {
-    const p = findProject(nameArg);
+    const p = resolveProject(nameArg);
     if (!p) {
-      console.log(`No project named "${nameArg}". Known projects:`);
-      for (const x of allProjects()) console.log(`  ${x.name}`);
+      console.log(`No project matching "${nameArg}". Known projects:`);
+      allProjects().forEach((x, i) => console.log(`  ${i + 1}  ${x.name}`));
       process.exit(1);
     }
     const cmds = defaultCommands(p);
@@ -956,14 +971,8 @@ export async function runLaunch() {
     return;
   }
 
-  const chosen = await mountScreen<Command[] | null>((done) => <LaunchScreen onChoose={done} />);
-  if (!chosen || !chosen.length) {
-    process.exit(0);
-  }
-  // Renderer is torn down by now; hand the terminal to the dev servers.
-  console.log(`\nStarting ...\n`);
-  for (const c of chosen) console.log(`> ${c.label}: ${c.command}  (${c.cwd})`);
-  startCommands(chosen);
+  await runLaunchScreen();
+  process.exit(0);
 }
 
 if (import.meta.main) {

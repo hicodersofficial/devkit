@@ -65,7 +65,8 @@ devkit/
 - The shared OpenTUI/React stack is a deliberate common dependency; beyond it keep
   each tool light and self-documenting (header comment: what it does + how to use).
 - Reuse the shared UI: `ListSelect` (keyboard list with `/` filter + optional
-  multi-select with `initialMarked`, mouse click/hover/scroll, `t` theme cycle;
+  multi-select with `initialMarked`, mouse click + hover-tint + scroll-wheel,
+  a stable scroll-into-view viewport (`windowStart`), `t` theme cycle;
   `immediateCancel` makes Esc go back in a single press on transient pickers,
   skipping the default peel + "press Esc again to exit" guard; `onReorder` enables
   `[`/`]` to move the highlighted row, advancing the cursor in lockstep),
@@ -77,10 +78,24 @@ devkit/
   fix are wired in.
 - **Theming:** colors come from `useTheme()` (never import a static palette).
   Presets live in `pkg/tui/theme.ts`; `t` cycles them and the choice persists to
-  `~/.devkit.json` (`pkg/core/config.ts`) so it applies across every tool.
+  `~/.devkit.json` (`pkg/core/config.ts`) so it applies across every tool. Row
+  states use `selBg` (cursor / clicked) and `hoverBg` (a subtler tint for the row
+  under the mouse) — adding a preset means filling in every token.
 - **Mouse on Windows:** `pkg/tui/winmouse.ts` patches `setRawMode` to re-apply
   `ENABLE_MOUSE_INPUT` (Bun wipes it — oven-sh/bun#25663). Without it, no mouse
   events arrive and terminal text selection breaks. `mountScreen` calls it.
+- **List rows are not text-selectable** (the `user-select: none`-on-controls rule).
+  On left mouse-down OpenTUI hit-tests the topmost renderable and starts a drag
+  text-selection if it's `selectable` — and `TextRenderable` defaults to
+  `selectable: true` (`BoxRenderable` is `false`), so a click landed on the row's
+  `<text>` and smeared a selection highlight across it. A row click is an *action*,
+  not "select this text". `ListSelect` therefore holds a `ref` to its root box and,
+  in an effect after every render, walks its own subtree setting
+  `selectable = false` (rows are rebuilt on filter/refresh/re-sort, and fresh
+  renderables default back to `true`). **Scope matters:** do *not* disable selection
+  renderer-wide (`renderer.startSelection`) — text outside the list (headers, hints,
+  help, streamed logs) must stay selectable and drag-copyable. This also means a
+  screen's `renderRow` needs no `selectable` prop; it's handled for every tool.
 - **ASCII-only in rendered text:** keep all on-screen strings ASCII. Ambiguous-
   width glyphs (arrows `↑↓`, `▸`, `↔`, `★`, `●`, `◉`/`○`, em dash, `…`) are
   mis-measured by OpenTUI on Windows terminals and corrupt the rest of the line
@@ -90,8 +105,12 @@ devkit/
   (see `Help`/`ListSelect`) rather than emitting bare sibling `<text>` nodes, and
   never embed `\n` inside a `<text>` — both cause lines to overlap. Use a
   `<box style={{ height: 1 }}>` for a blank spacer line.
-- The hub runs each chosen tool as a child process (`bun pkg/tui/<tool>.tsx`), so
-  tools get a clean terminal and the menu returns when they exit.
+- The hub runs each chosen tool **in-process** via the shared `mountScreen` loop
+  (each tool exports a `run<Tool>Screen()` the registry calls) — it tears its own
+  screen down, mounts the tool's, and shows the menu again when the tool returns.
+  In-process (not a child process) is what keeps raw keyboard/mouse alive on
+  Windows. `killport` returns to the menu on quit; `launch` streams its dev-server
+  logs and holds the terminal until Ctrl-C (like running `launch` standalone).
 - Hard-coded machine-specific paths (e.g. project directories) live near the top
   of each file as named constants so they're easy to find and adjust.
 
@@ -101,10 +120,43 @@ Every screen supports `h` for an in-app keybinding help overlay (any key closes)
 `q` to quit, and `t` to cycle the color theme (persisted to `~/.devkit.json`,
 shared by all tools). **Esc** is gentle: it peels back one step at a time (clear
 filter → cancel visual sweep → clear selection) and only exits on a **second**
-Esc, which shows a "Press Esc again to exit" hint. **Mouse** works too: click a
-row to highlight, **hover** to move the highlight, double-click to activate,
-scroll to navigate, and click the `[ y · Yes ]` / `[ n · No ]` confirm buttons.
-All in the shared `ListSelect` / `Confirm`.
+Esc, which shows a "Press Esc again to exit" hint. **Mouse** works too: **hover**
+tints the row under the pointer (`hoverBg`), a **single click** activates the row
+(same as Enter on it — there is no double-click), the **wheel** navigates, and the
+`[ y · Yes ]` / `[ n · No ]` confirm buttons are clickable. All in the shared
+`ListSelect` / `Confirm`. Since a click *runs* the row, there's no click-to-just-
+highlight gesture: keys that act on the highlighted row (launch's `e`/`d`/`a`/`p`)
+are driven by moving the cursor with `j`/`k` or the wheel.
+
+**Viewport = scroll-into-view, never cursor-centering** (`windowStart()` in
+`ListSelect`): the window holds still and only moves when the cursor steps *off*
+an edge, and then by exactly one row. Clicking a visible row, hovering, or a
+killport auto-refresh therefore never shift the list — it scrolls only on the
+wheel or when you walk past an edge with `j`/`k`. (Centering the cursor was the
+old layout shift: every cursor change re-centered the window and pulled in a row,
+so a click mid-list visibly jumped.) Hover is likewise **cosmetic only** — it
+tints, but never moves the cursor or the viewport, so it cannot scroll.
+
+**Hover / selection are both backgrounds on the row `<box>`**, set in one place in
+`ListSelect` — `selected ? theme.selBg : hovered ? theme.hoverBg : undefined`.
+Backgrounds repaint existing cells, so neither state changes the row's height:
+no layout shift as the pointer moves. Rows therefore need **no** hover plumbing —
+`renderRow` only receives `{ selected, marked }`.
+
+Two dead ends worth not re-litigating: a row-`<box>` **`border: ["bottom"]`** looks
+like an underline but **costs a whole extra row** (measured: 4 rows render as 5
+lines), i.e. it re-introduces the layout shift on every hover. And a **text
+underline** (`TextAttributes.UNDERLINE`) can only live on `<text>`/`<span>`, not on
+a box — and a terminal draws it in each span's own `fg`, so a multi-column row
+underlines in several colors at once. Making it one color meant collapsing every
+column's `fg` and threading `hovered` into all 7 row components; `hoverBg` gets
+the same affordance for free.
+
+**Non-selectable rows stay inert.** `ListSelect` gates *both* hover and click on
+`isSelectable`, so a row that can't be picked (killport's **protected** system
+processes) never takes the hover highlight and a click on it does nothing — not
+even move the cursor. Without this, hovering a protected row lit it up like a
+clickable one and the click then silently did nothing.
 
 ### `devkit` — the hub
 Interactive menu listing every registered tool (from `pkg/tui/tools.tsx`); Enter
@@ -237,17 +289,22 @@ folder to the scan root's `exclude` list — never touches disk; un-hide via `s`
 rescan · `/` filter · `h` help (grouped) · `t` theme · `q`/Esc-Esc quit. Or direct:
 
 - `launch` — interactive picker
-- `launch <name>` — start that project's default command(s)
+- `launch <name|partial|index>` — start that project's default command(s), matched
+  (via `resolveProject`) by full name, a partial/prefix, or its 1-based position
+  in the displayed list (recent sort: `1` = last opened; manual sort: visible top)
 - Core: `pkg/core/launch.ts` (+ `pkg/core/manifest.ts`) · UI: `pkg/tui/launch.tsx`
   (text entry via the shared `TextPrompt` component)
 
 ## Adding a new tool
 
 1. **Logic** → `pkg/core/<tool>.ts`: pure functions, no UI/`console`.
-2. **UI** → `pkg/tui/<tool>.tsx`: a `<Screen>` built on the shared components, plus
-   a CLI entry guarded by `if (import.meta.main)`. Reuse `mountScreen`, `ListSelect`,
-   `Header`, `Confirm`.
-3. **Register** → add a row to `TOOLS` in `pkg/tui/tools.tsx` so the hub lists it.
+2. **UI** → `pkg/tui/<tool>.tsx`: a `<Screen>` built on the shared components, a
+   CLI entry guarded by `if (import.meta.main)`, and an exported
+   `run<Tool>Screen()` that `mountScreen`s the screen and returns (no
+   `process.exit`) so the hub can run it in-process. Reuse `mountScreen`,
+   `ListSelect`, `Header`, `Confirm`.
+3. **Register** → add a row to `TOOLS` in `pkg/tui/tools.tsx` (with
+   `run: () => run<Tool>Screen()`) so the hub lists and runs it.
 4. **Shim** → `bin/<tool>.bat` (on PATH, so `<tool>` works from any shell):
    ```bat
    @echo off

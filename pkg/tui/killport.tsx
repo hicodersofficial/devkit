@@ -326,6 +326,14 @@ async function runKillCli(ports: number[], autoYes: boolean) {
   }
 }
 
+// Mount just the interactive picker and return to the caller when it exits (no
+// process.exit) — used by the devkit hub, which runs tools in-process in a loop.
+export async function runKillportScreen(interval = DEFAULT_REFRESH) {
+  await mountScreen<void>((done) => (
+    <KillportScreen onExit={done} initialInterval={interval} />
+  ));
+}
+
 export async function runKillport() {
   const argv = process.argv.slice(2);
   if (argv.includes("-h") || argv.includes("--help")) {
@@ -345,9 +353,7 @@ export async function runKillport() {
   if (ports.length) {
     await runKillCli(ports, autoYes);
   } else {
-    await mountScreen<void>((done) => (
-      <KillportScreen onExit={done} initialInterval={parseInterval(argv)} />
-    ));
+    await runKillportScreen(parseInterval(argv));
     process.exit(0);
   }
 }

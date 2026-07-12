@@ -1,14 +1,18 @@
-// Registry of tools shown in the `devkit` hub. Each entry points at a screen
-// file in this folder that the hub spawns as a child process.
+// Registry of tools shown in the `devkit` hub. Each entry carries a `run`
+// function that mounts the tool's screen in-process (the hub runs tools in the
+// same process, in a loop, rather than spawning a child).
 //
-// Adding a tool: build pkg/core/<tool>.ts + pkg/tui/<tool>.tsx, then add a row
-// here and a bin/<tool>.bat shim.
+// Adding a tool: build pkg/core/<tool>.ts + pkg/tui/<tool>.tsx (exporting a
+// hub-friendly run<Tool>Screen), then add a row here and a bin/<tool>.bat shim.
+
+import { runKillportScreen } from "./killport";
+import { runLaunchScreen } from "./launch";
 
 export interface ToolDef {
   id: string;
   label: string;
   description: string;
-  file: string; // filename within pkg/tui (spawned via `bun`)
+  run: () => Promise<void>; // mounts the tool's screen in-process
 }
 
 export const TOOLS: ToolDef[] = [
@@ -16,12 +20,12 @@ export const TOOLS: ToolDef[] = [
     id: "killport",
     label: "killport",
     description: "Find and kill processes by port",
-    file: "killport.tsx",
+    run: () => runKillportScreen(),
   },
   {
     id: "launch",
     label: "launch",
     description: "Start your dev projects",
-    file: "launch.tsx",
+    run: () => runLaunchScreen(),
   },
 ];
