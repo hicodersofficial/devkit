@@ -127,6 +127,13 @@ function guessDefaultIds(cmds: Command[]): string[] {
   return ids.length ? ids : cmds.map((c) => c.id);
 }
 
+// Default command(s) first, then the rest — so the `a` picker leads with what Enter
+// would have started. Stable (JS sort is), so each group keeps its detection order
+// (already backend-before-frontend). Not sorted by *marked*: that would reshuffle the
+// list between runs as the last-run set changes.
+const defaultsFirst = (cmds: Command[]): Command[] =>
+  [...cmds].sort((a, b) => Number(!!b.isDefault) - Number(!!a.isDefault));
+
 function sectionLabelFor(id: string): string {
   if (id === "pinned") return "* PINNED";
   return id === "manual" ? "PROJECTS" : `SCANNED | ${basename(id) || id}`;
@@ -451,18 +458,23 @@ export function LaunchScreen({
   if (mode === "run" && target) {
     const preMarked = lastRunIds(target);
     const remembered = lastRunLabels(target.id, cfg).length > 0;
+    const cmds = defaultsFirst(target.commands);
+    // Only section the list when there's actually a split to show.
+    const mixed = cmds.some((c) => c.isDefault) && cmds.some((c) => !c.isDefault);
     return (
       <Frame
         title={`run: ${target.name}`}
         hint={`space/tab select | enter run | q/esc back${remembered ? " | last run pre-selected" : ""}`}
       >
         <ListSelect
-          items={target.commands}
+          items={cmds}
           getKey={(c) => c.id}
           filterText={(c) => `${c.label} ${c.command}`}
           multiSelect
           immediateCancel
           initialMarked={preMarked}
+          sectionOf={mixed ? (c) => (c.isDefault ? "default" : "other") : undefined}
+          sectionLabel={(id) => (id === "default" ? "DEFAULT" : "OTHER")}
           emptyText="This project has no commands."
           onSubmit={(cmds) => launch(target, cmds)}
           onCancel={() => go("list")}
