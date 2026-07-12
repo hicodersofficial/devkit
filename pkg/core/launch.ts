@@ -83,22 +83,37 @@ function emptyConfig(): LaunchConfig {
   };
 }
 
+/**
+ * Scan roots live at the TOP LEVEL of ~/.devkit.json (`scanRoots`) so other
+ * tools (e.g. clean) can share them without reaching into launch's config.
+ * Older configs stored them under `launch.scanRoots` — reads fall back to that,
+ * and the next saveLaunch() writes them top-level (a lazy, lossless migration).
+ */
+export function loadScanRoots(): ScanRoot[] {
+  const cfg = loadConfig();
+  return cfg.scanRoots ?? cfg.launch?.scanRoots ?? [];
+}
+
 export function loadLaunch(): LaunchConfig {
-  const c = loadConfig().launch;
-  if (!c) return emptyConfig();
+  const cfg = loadConfig();
+  const c = cfg.launch;
   return {
-    projects: c.projects ?? [],
-    scanRoots: c.scanRoots ?? [],
-    pinned: c.pinned ?? [],
-    order: c.order ?? [],
-    sortMode: c.sortMode ?? "manual",
-    lastRun: c.lastRun ?? {},
-    lastRunAt: c.lastRunAt ?? {},
+    projects: c?.projects ?? [],
+    scanRoots: cfg.scanRoots ?? c?.scanRoots ?? [],
+    pinned: c?.pinned ?? [],
+    order: c?.order ?? [],
+    sortMode: c?.sortMode ?? "manual",
+    lastRun: c?.lastRun ?? {},
+    lastRunAt: c?.lastRunAt ?? {},
   };
 }
 
 export function saveLaunch(cfg: LaunchConfig): void {
-  saveConfig({ launch: cfg });
+  // Split on write: roots go to the shared top-level key, the rest under
+  // `launch`. Writing `launch` whole (without scanRoots) also completes the
+  // migration away from any legacy `launch.scanRoots` still in the file.
+  const { scanRoots, ...launchRest } = cfg;
+  saveConfig({ launch: launchRest, scanRoots });
 }
 
 export function addProject(p: Project): void {

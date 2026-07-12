@@ -15,6 +15,7 @@
 
 import { homedir } from "node:os";
 import { readlinkSync } from "node:fs";
+import { runCapture, firstCapture } from "./proc";
 
 export type PortCategory = "app" | "service" | "other";
 
@@ -171,33 +172,6 @@ interface ProcRow {
   Id: number;
   ProcessName: string | null;
   Path: string | null;
-}
-
-// Run a command and capture its output. A missing executable (Bun.spawn throws
-// "Executable not found in $PATH") is turned into a non-zero result rather than
-// propagating, so a tool absent on this OS just yields no rows.
-async function runCapture(cmd: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    return { stdout, stderr, code };
-  } catch (e) {
-    return { stdout: "", stderr: e instanceof Error ? e.message : String(e), code: -1 };
-  }
-}
-
-// Try each command in turn, returning the first that runs (exit code 0). Used to
-// probe alternative binary locations (e.g. ss in /usr/sbin vs /usr/bin).
-async function firstCapture(cmds: string[][]): Promise<string> {
-  for (const cmd of cmds) {
-    const r = await runCapture(cmd);
-    if (r.code === 0) return r.stdout;
-  }
-  return "";
 }
 
 function isSystem(pid: number, name: string): boolean {

@@ -63,6 +63,13 @@ export function windowStart(prev: number, cur: number, total: number, maxVisible
   return start;
 }
 
+/** Imperative controls a parent can hold via the `controlRef` prop. */
+export interface ListSelectHandle {
+  /** Move the cursor (and viewport, via scroll-into-view) to the item with this
+   *  key. No-op when the key isn't in the current (filtered) list. */
+  jumpTo: (key: string) => void;
+}
+
 export interface ListSelectProps<T> {
   items: T[];
   getKey: (item: T) => string;
@@ -98,6 +105,9 @@ export interface ListSelectProps<T> {
   emptyText?: string;
   /** Max rows to show at once; defaults to terminal height minus chrome. */
   maxVisible?: number;
+  /** Receives imperative controls (jumpTo) — a plain ref object, assigned on
+   *  every render (avoids forwardRef's poor ergonomics with generics). */
+  controlRef?: { current: ListSelectHandle | null };
 }
 
 export function ListSelect<T>(props: ListSelectProps<T>) {
@@ -119,6 +129,7 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
     sectionLabel,
     onInteractingChange,
     emptyText = "(nothing to show)",
+    controlRef,
   } = props;
 
   const theme = useTheme();
@@ -200,6 +211,17 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
   // Mirror derived state so the keyboard handler always reads fresh values.
   const ref = useRef({ filtered, cur, filtering, anchor, marked, escArmed });
   ref.current = { filtered, cur, filtering, anchor, marked, escArmed };
+
+  // Imperative controls for the parent (e.g. clean's `g` jumping the cursor to
+  // the GLOBALS section). Reassigned each render so it closes over fresh state.
+  if (controlRef) {
+    controlRef.current = {
+      jumpTo: (key: string) => {
+        const idx = ref.current.filtered.findIndex((it) => getKey(it) === key);
+        if (idx >= 0) setCursor(idx);
+      },
+    };
+  }
 
   // Let the parent pause things (e.g. auto-refresh) while the user is filtering
   // or mid visual-sweep, so the list doesn't shift under them.

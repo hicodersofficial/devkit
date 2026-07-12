@@ -18,24 +18,33 @@ its UI so the same core can back a future GUI.
 devkit/
 ├── bin/                 # launcher shims — this folder is on PATH
 │   ├── devkit.bat       # → pkg/tui/devkit.tsx  (the hub)
-│   ├── launch.bat       # → pkg/tui/launch.tsx
-│   └── killport.bat     # → pkg/tui/killport.tsx
+│   ├── launch.bat       # → pkg/tui/launch.tsx   (same pattern for every tool)
+│   ├── killport.bat
+│   ├── clean.bat
+│   └── x.bat
 ├── pkg/
 │   ├── core/            # PURE logic — no terminal UI, reusable by a future GUI
 │   │   ├── launch.ts    # project registry + scan, config CRUD, startCommands
 │   │   ├── killport.ts
+│   │   ├── clean.ts     # artifact scan/size/delete + global packages
+│   │   ├── x.ts         # detect() — ranked readings of any pasted string
 │   │   ├── manifest.ts  # read package.json/go.mod/Cargo.toml/pyproject for cmds
 │   │   ├── appname.ts   # resolve app name from a pid's cwd (cross-platform)
-│   │   └── config.ts    # persisted settings (~/.devkit.json): theme + launch
+│   │   ├── proc.ts      # defensive spawn helpers (runCapture/firstCapture/runFeed)
+│   │   ├── clipboard.ts # cross-platform clipboard copyText/readText
+│   │   └── config.ts    # persisted settings (~/.devkit.json): theme + scanRoots + launch
 │   └── tui/             # OpenTUI/React screens
 │       ├── app.tsx          # mountScreen() — renderer bootstrap + teardown
 │       ├── theme.ts         # Theme type + color presets
 │       ├── theme-context.tsx# ThemeProvider / useTheme / cycle (t key)
 │       ├── winmouse.ts      # Windows mouse fix (Bun #25663 workaround)
+│       ├── winsize.ts       # live terminal size via Win32 (SIGWINCH shim)
 │       ├── tools.tsx        # tool registry the hub lists
 │       ├── devkit.tsx       # the hub screen
 │       ├── launch.tsx       # launch screen + CLI entry
 │       ├── killport.tsx     # killport screen + CLI entry
+│       ├── clean.tsx        # clean screen + CLI entry
+│       ├── x.tsx            # x screen + CLI entry
 │       └── components/      # shared UI: ListSelect, Header, Confirm, Help, TextPrompt
 ├── tsconfig.json
 ├── package.json
@@ -84,6 +93,16 @@ devkit/
 - **Mouse on Windows:** `pkg/tui/winmouse.ts` patches `setRawMode` to re-apply
   `ENABLE_MOUSE_INPUT` (Bun wipes it — oven-sh/bun#25663). Without it, no mouse
   events arrive and terminal text selection breaks. `mountScreen` calls it.
+- **Resize on Windows:** OpenTUI's only resize source is `process.on("SIGWINCH")`,
+  which never fires on Windows — and Bun's `stdout.columns/rows` are snapshotted
+  at startup there, so polling them never sees a change either. `mountScreen`
+  shims it with `pkg/tui/winsize.ts`: `terminalSize()` asks the Win32 console
+  directly (`GetConsoleScreenBufferInfo` via `bun:ffi`, reading `srWindow` from
+  the 22-byte CSBI struct — same kernel32 pattern as winmouse) and falls back to
+  `stdout.columns/rows` off Windows / when no console is attached (piped, test
+  harness → clean `null`). A 300ms poll plus a listener on stdout's `"resize"`
+  event calls `renderer.resize(w, h)` on change; `processResize` no-ops when
+  unchanged, so the poll is free. Poll + listener are cleaned up in `done()`.
 - **List rows are not text-selectable** (the `user-select: none`-on-controls rule).
   On left mouse-down OpenTUI hit-tests the topmost renderable and starts a drag
   text-selection if it's `selectable` — and `TextRenderable` defaults to
@@ -113,6 +132,19 @@ devkit/
   logs and holds the terminal until Ctrl-C (like running `launch` standalone).
 - Hard-coded machine-specific paths (e.g. project directories) live near the top
   of each file as named constants so they're easy to find and adjust.
+- **`scanRoots` are shared config**, stored at the TOP LEVEL of `~/.devkit.json` —
+  the project folders every cross-project tool works from (`launch` discovers
+  runnable projects there, `clean` reclaims their build artifacts). Read them via
+  `loadScanRoots()` (`pkg/core/launch.ts`); never reach into `launch`'s own
+  config. Legacy configs kept them under `launch.scanRoots` — reads fall back to
+  that and the next `saveLaunch()` migrates them up. A root's `exclude` list is a
+  *launch-view* concern (hiding projects from the picker); `clean` ignores it.
+- **CLI tools respect pipes** (`x`): when stdout is **not a TTY**, print the raw
+  value/output only — no headings, no "Copied." chatter, no clipboard side
+  effects — so they compose (`... | x`, `x <val> | jq`). When stdout IS a TTY,
+  be helpful: headings, notes, copy to clipboard. Check `process.stdout.isTTY`.
+- **Clipboard** goes through `pkg/core/clipboard.ts` (`copyText`/`readText`,
+  cross-platform, defensive) — never spawn `clip`/`pbcopy` directly in a screen.
 
 ## Tools
 
@@ -299,6 +331,103 @@ rescan · `/` filter · `h` help (grouped) · `t` theme · `q`/Esc-Esc quit. Or 
   mode rather than `list` — Esc still falls back to the project list.
 - Core: `pkg/core/launch.ts` (+ `pkg/core/manifest.ts`) · UI: `pkg/tui/launch.tsx`
   (text entry via the shared `TextPrompt` component)
+
+### `clean` — reclaim disk space
+Finds regenerable **build artifacts** (`node_modules`, `.next`, `.nuxt`, `.turbo`,
+`dist`, `build`, `out`, `target`, `__pycache__`, `.pytest_cache`, `coverage`)
+across every project under the shared scan roots — each project folder plus one
+level of subpackages (monorepos). **Dry-run by default**: running `clean` only
+scans and reports; nothing is deleted until rows are marked and a Confirm is
+answered, and there is deliberately **no non-interactive delete flag**.
+
+Rows are `KIND · PROJECT · SIZE · LAST USED`. Discovery (`scanArtifacts`, a cheap
+readdir pass) is split from **sizing** (`sizeArtifacts`) because a `node_modules`
+holds 50k+ files: what needs measuring is walked on a small concurrency pool
+(4 walkers) and the SIZE column fills in as each tree finishes — the same
+lazy-fill pattern as killport's app names.
+
+**Sizes are measured once and cached with a validity key** (`~/.devkit-cache.json`
+— deliberately *not* SWR; a trusted cache entry is never re-walked). The key
+says when a cached number stops being trustworthy (`artifactKey`/`globalKey` in
+core): `node_modules` → the **hash of the project's lockfile** (first of
+bun.lock/bun.lockb/package-lock.json/pnpm-lock.yaml/yarn.lock/deno.lock — deps
+changed ⇒ re-measure); other artifact kinds → the artifact dir's **mtime**
+(rebuilds touch it); globals → the installed **version**. On mount, entries with
+a matching key are adopted as-is and only the rest are walked — so the first run
+measures everything, later runs measure only what changed. Manual re-measure:
+**`u`** (highlighted row) / **`r`** (refresh everything: rescan the folders AND
+re-measure all sizes) — both evict the cache entries first, so a forced refresh
+never trusts old numbers. Deleted/uninstalled paths are evicted so they don't
+ghost-paint. Sorting (`s`) is size↔name; the header totals what's reclaimable
+with a `sizing i/n` ASCII spinner while walks are in flight.
+
+The sizing engine lives in **refs, not an effect** (`pump`/`enqueue` in
+`clean.tsx`): an effect-scoped pool got cancelled by its own cleanup whenever
+`arts` changed identity mid-run (e.g. when the in-use marking landed), stranding
+every unfinished row — the "stuck at 3/n" bug. The ref-based pool survives any
+re-render; a reconciler effect only adopts valid cache entries and queues the
+rest (idempotent). Refreshing a path mid-walk is safe: `u`/`r` remove it from
+`sized`, so the in-flight result fails a "still wanted?" check on completion,
+is discarded, and the path re-queues — without disturbing the rest of the run.
+A watchdog in the spinner interval enforces the invariant "pending + idle =
+re-queue": if rows are unsized but nothing is queued or walking, they're
+re-queued automatically.
+
+A project with a **live listening process working inside it** (cwds via
+`listListeners()` + `readProcessCwd()`) is marked `(in use)` and can't be
+selected — deleting `node_modules` under a running dev server is the one real
+foot-gun. (Limitation: a portless process like a bare `tsc --watch` isn't seen.)
+After a delete that included a `node_modules`, a Confirm offers to **reinstall**
+(`detectPm()` per project); accepting tears the screen down and streams
+`<pm> install` per project (launch's terminal-handoff pattern).
+
+**Globals are shown only when asked**: `g` (or `--globals`) reveals a GLOBALS
+section listing packages from **bun + npm + pnpm + deno** (`MANAGER · NAME ·
+SIZE · VERSION`, loaded lazily, each manager probed defensively). Turning `g` on
+also **jumps the cursor onto the section** (no manual scroll past all the
+artifacts) — deferred until the lazily-loaded rows exist, then driven through
+`ListSelect`'s `controlRef` handle (`jumpTo(key)`); scroll-into-view brings the
+viewport along. Each package's
+**size** is measured too: `listGlobals` resolves the on-disk path per manager
+(bun's global `node_modules` from `bun pm ls -g`'s first line, `npm root -g`,
+`pnpm root -g`; deno = the binaries in `~/.deno/bin`, grouped by stem) and those
+paths flow through the same sizing pool + SWR cache as artifacts. Both sections
+carry subtotals in their headers and the screen header shows the combined
+"X reclaimable (artifacts + globals)" plus a `sizing 12/58 |` ASCII spinner
+while walks are in flight. Marked globals are uninstalled via their own manager
+(deno falls back to the legacy no-`-g` uninstall). The managers themselves
+(`npm`, `pnpm`, `yarn`, `corepack`, `bun`, `deno`) and `@hicoders/devkit` are
+protected rows.
+
+- `clean` — interactive picker (a scan/report until you mark + confirm)
+- `clean --globals` — start with the GLOBALS section already shown
+- Core: `pkg/core/clean.ts` · UI: `pkg/tui/clean.tsx`
+
+### `x` — decode anything
+Paste a string, get it readable — **locally** (zero network, nothing persisted;
+the point is that real tokens stop going to jwt.io / base64decode.org /
+epochconverter.com). `detect()` runs every detector and returns ranked candidate
+readings: **jwt** (header+claims pretty-printed, `exp`/`iat`/`nbf` humanized as
+"EXPIRED 3h ago", loud warning on `alg: none`, always noted as decoded-NOT-
+verified; an empty signature part is accepted since `alg:none` tokens end with
+a bare dot), **json** (pretty-print; malformed input reports the parse error
+plus hints like trailing commas / unquoted keys), **base64/base64url** (printable-
+ratio gated; decoding to JSON boosts confidence and pretty-prints; short all-alpha
+words are damped to avoid false hits), **epoch** (10/13-digit within 2001–2100 →
+local + UTC + relative), **uuid** (version/variant; v7 shows its embedded
+timestamp), **url** (decode + query params split out), **hash** (32/40/64/96/128
+hex → md5/sha1/sha256/... guess, low confidence by design), **color** (#hex →
+rgb/hsl), **cron** (per-field English, 6 fields read Quartz seconds-first).
+
+Input precedence: **argument > piped stdin > clipboard** — so bare `x` decodes
+whatever was just copied. TTY output prints a heading + note + "also matched:
+..."; piped output is the rendered result only.
+
+- `x <value>` / `... | x` / `x` (clipboard)
+- `x --as <type>` force a reading · `x --all` print every candidate · `-c` copy
+  the output back to the clipboard · `-i` interactive screen (TextPrompt input,
+  `t`/arrows cycle candidate readings, `c` copy, `n` new input)
+- Core: `pkg/core/x.ts` · UI: `pkg/tui/x.tsx`
 
 ## Adding a new tool
 

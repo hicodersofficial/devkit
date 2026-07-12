@@ -21,6 +21,7 @@ import {
   type PortCategory,
 } from "../core/killport";
 import { resolveAppName } from "../core/appname";
+import { copyText } from "../core/clipboard";
 
 type Row = Listener & { appName?: string };
 
@@ -53,14 +54,6 @@ const HELP: Binding[] = [
   { keys: "q / esc esc", desc: "quit (q, or Esc twice)" },
 ];
 
-function copyPid(pid: number): boolean {
-  try {
-    Bun.spawn(["clip"], { stdin: Buffer.from(String(pid)) });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // Columns: PORT · PID · NAME · PROCESS. PORT/PID/NAME are fixed width (NAME a bit
 // wider than the old runtime column); PROCESS is last and fills the remaining
@@ -267,7 +260,9 @@ export function KillportScreen({
           else if (name === "i") setIntervalMs((ms) => nextInterval(ms));
           else if (name === "h") setShowHelp(true);
           else if (name === "y" && current)
-            setStatus(copyPid(current.pid) ? `Copied PID ${current.pid}` : "Copy failed");
+            void copyText(String(current.pid)).then((ok) =>
+              setStatus(ok ? `Copied PID ${current.pid}` : "Copy failed"),
+            );
         }}
         renderRow={(l, { selected }) => (
           <PortRow l={l} selected={selected} procWidth={procWidth} />
@@ -341,9 +336,15 @@ export async function runKillport() {
       [
         "Usage: killport [ports...] [-y] [--interval=<ms|off>]",
         "  killport               interactive picker",
-        "  killport 3000 8080     kill listeners on those ports",
+        "  killport <ports...>    kill listeners on those ports",
         "  -y, --yes              skip the confirmation prompt",
         "  --interval=<ms|off>    picker auto-refresh (default 1500)",
+        "",
+        "Examples:",
+        "  killport                  see everything listening, pick what to kill",
+        "  killport 3000             kill whatever holds port 3000 (confirms)",
+        "  killport 3000 8080 -y     kill both, no questions",
+        "  killport --interval=off   picker without auto-refresh",
       ].join("\n"),
     );
     return;

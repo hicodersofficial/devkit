@@ -7,6 +7,8 @@
 
 import { runKillportScreen } from "./killport";
 import { runLaunchScreen } from "./launch";
+import { runCleanScreen } from "./clean";
+import { runXScreen } from "./x";
 
 export interface ToolDef {
   id: string;
@@ -27,5 +29,17 @@ export const TOOLS: ToolDef[] = [
     label: "launch",
     description: "Start your dev projects",
     run: () => runLaunchScreen(),
+  },
+  {
+    id: "clean",
+    label: "clean",
+    description: "Reclaim disk: build artifacts + global packages",
+    run: () => runCleanScreen(),
+  },
+  {
+    id: "x",
+    label: "x",
+    description: "Decode anything: JWT, base64, epoch, JSON, ...",
+    run: () => runXScreen(),
   },
 ];

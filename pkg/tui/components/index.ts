@@ -1,5 +1,5 @@
 export { ListSelect } from "./ListSelect";
-export type { ListSelectProps } from "./ListSelect";
+export type { ListSelectProps, ListSelectHandle } from "./ListSelect";
 export { Header } from "./Header";
 export { Confirm } from "./Confirm";
 export { Help } from "./Help";

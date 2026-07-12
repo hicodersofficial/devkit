@@ -58,6 +58,40 @@ automatically — reading `package.json`, `go.mod`, `Cargo.toml`, and
   run — it even remembers your last choice.
 - Add projects by auto-detecting a folder, or by hand.
 
+### 🧹 Reclaim gigabytes in one sweep
+
+Every project you've ever touched is sitting on a `node_modules`, a `dist`, a
+`target/` you forgot about.
+
+```sh
+clean                  # see everything, sorted by size — biggest first
+clean --globals        # include globally installed packages too
+```
+
+`clean` scans your project folders and lists every build artifact with its real
+size and how stale it is. Mark what you want gone, confirm once, watch the
+gigabytes come back. **Nothing is ever deleted without your explicit confirm** —
+running it is always a safe report. Projects with a dev server running are
+marked *in use* and can't even be selected. Deleted a `node_modules` you needed?
+It offers to reinstall right there. Sizes are measured once and cached — the
+next run is instant, and a size is only re-measured when it actually might have
+changed (your lockfile changed, the folder was rebuilt) or when you ask (`u` for
+one row, `r` to refresh everything).
+
+### 🔍 Decode anything — without pasting your tokens into a website
+
+JWT? base64? epoch timestamp? Stop feeding production tokens to jwt.io.
+
+```sh
+x eyJhbGciOi...        # a JWT -> header, claims, "EXPIRED 3h ago"
+x 1700000000           # an epoch -> local, UTC, "2 years ago"
+x                      # or just copy something and run x - it detects it
+```
+
+`x` auto-detects what you pasted — JWTs, base64, URL-encoding, timestamps, JSON
+(it even points at the syntax error), UUIDs, hashes, cron schedules, hex colors —
+and makes it readable. **Entirely offline.** Nothing leaves your machine, ever.
+
 ### 🧰 One hub for all of it
 
 ```sh

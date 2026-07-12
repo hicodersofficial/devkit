@@ -970,13 +970,16 @@ export async function runLaunch() {
       [
         "Usage: launch [name|partial|index] [-a]",
         "  launch                 interactive picker",
-        '  launch "Auth Service"  start that project by full name',
-        "  launch auth            ... or by a partial name",
-        "  launch 1               ... or by its position in the list",
-        "",
+        "  launch <project>       start that project's default command(s)",
         "  -a, --ask              pick which scripts to run instead of the",
         "                         defaults (pre-marked with your last run)",
-        "  launch auth -a         e.g. choose the scripts for a one-off run",
+        "",
+        "Examples:",
+        '  launch "Auth Service"  full name',
+        "  launch auth            a partial name works too",
+        "  launch 1               1-based position in the list (recent sort:",
+        "                         1 = the project you opened last)",
+        "  launch auth -a         choose the scripts for a one-off run",
       ].join("\n"),
     );
     return;
