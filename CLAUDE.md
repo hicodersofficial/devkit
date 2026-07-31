@@ -308,11 +308,16 @@ from the root's `exclude` so it's scanned again. Hiding/adopting never touch dis
 so they're always reversible here. (Deleting a *manual* project is permanent —
 there's no folder to restore it from.)
 
-Picker keys: `↑↓`/`j`/`k` move · Enter start defaults · **`a`** pick which
+Picker keys: `↑↓`/`j`/`k` move · **`Space`/`Tab`** mark several projects to
+launch together (`v` visual-range sweep) · **Enter** run the marked projects
+(or just the highlighted one), each in its own tab by default · **`c`** same,
+but concurrently in one pane · **`x`** same, but expand every script to its
+own tab · **`a`** pick which
 commands to run for this run (a multi-select, pre-marked with your last run else
 the defaults) · **`p`** pin / unpin · **`[` `]`** reorder (manual sort) · **`o`**
 toggle sort (manual ↔ recent) · **`n`**
-add a project (auto / manual / scan folder) · **`e`** edit (rename, set defaults,
+add a project (auto / manual / scan folder / combine existing projects into a
+group) · **`e`** edit (rename, set defaults,
 remove commands; editing a scanned project first **adopts** it — copies it into
 your config and excludes the original folder from the scan so it isn't listed
 twice) · **`d`** delete a manual project, or **hide** a scanned one (adds its
@@ -328,7 +333,106 @@ rescan · `/` filter · `h` help (grouped) · `t` theme · `q`/Esc-Esc quit. Or 
   open **that project's command picker** (the same `a` page as in the TUI,
   pre-marked with your last run else the defaults) and run what you select. Done
   by passing `initialProject` to `LaunchScreen`, which then starts in its `run`
-  mode rather than `list` — Esc still falls back to the project list.
+  mode rather than `list` — Esc still falls back to the project list. **`s`**
+  in that picker persists the current marks as the project's real default
+  commands (`isDefault` on each, via `updateProject`) — separate from
+  running: Enter always just runs whatever's currently checked, one-off,
+  never implicitly changing what's saved. Adopts a scanned project into the
+  config first if needed (same as the list's `e` key); no-op on a
+  group/merge (its defaults live on its members, not on itself).
+- `launch <a> <b> ...` — fuzzy-launch several projects together (each name
+  resolved independently via `matchProject`, against one shared `allProjects()`
+  snapshot rather than rescanning per name). Interdependent apps (a backend +
+  its frontend living as separate projects) start with one command instead of
+  two terminals — **one tab per project** by default (each running that
+  project's own default commands together, same as launching it alone);
+  `-st`/`--script-tabs` expands every script across every project to its own
+  tab instead; `-c`/`--concurrent` runs everything together in one pane
+  regardless (no project/script distinction there — see below). `-a` opens
+  the combined ask-picker instead of starting defaults (always per-script,
+  regardless of `-st` — see below).
+
+**Group projects** (`n` → "Combine existing projects"): save a multi-project
+combo permanently — e.g. `sustainatrix` = `esg-kpi` + `auth-service` — so
+`launch sustainatrix` runs both from then on. A group is a normal `Project`
+that stores only `memberIds: string[]` (never a command snapshot); `commands`
+is **recomputed live** by `scanProjects()` on every load from the members'
+*current* commands (label-prefixed `"<member>: <label>"`), so renaming a
+script or re-flagging a default on a member shows up in the group with zero
+re-editing. This is why a group needs no parallel machinery: `defaultCommands`,
+the `a` picker, `recordLastRun`, pin/sort all already operate on `Project`/
+`Command` and just work. No nested groups (a group can't include another
+group as a member). Editing a group (`e`) shows a reduced menu — Rename /
+Edit members — since there are no stored commands to set defaults on or
+remove. An ad-hoc CLI multi-launch (`launch esg auth`, not saved) builds the
+same kind of merged `Project` in memory via `mergeProjects()`, with a
+deterministic id (hash of sorted member ids) so repeating the same combo
+reuses one `lastRun` entry instead of growing a fresh orphaned one each time.
+
+**Where the output goes** is decided *only* by whether the resolved project
+is a group (`memberIds` non-empty) — an ordinary project's own multi-default
+launch (e.g. backend + frontend) always uses the original `startCommands`
+(one pane, interleaved, unlabeled), untouched. For a group, there are two
+dispatchers, chosen by *how* the launch happened, not by the platform:
+
+- **Project granularity (the default)** — a plain `launch <a> <b>`,
+  `launch <groupName>`, or Enter/`c`/`x` on the main list — goes through
+  `launchGrouped()`, whose commands come from **`defaultGroupCommands()`**
+  (each member's own `defaultCommands()`, prefixed and flattened) — **not**
+  `groupCommands()`'s full list. That distinction matters: `groupCommands()`
+  (every script a member has, lint/build/test included) is only for a
+  group's persisted `commands`/the ask-picker, where the user is meant to
+  choose a subset themselves; `launchGrouped()` running that same full list
+  would silently start every script each member owns instead of just its
+  defaults (a real bug caught in testing — fixed by giving it its own
+  default-only helper rather than reusing `groupCommands()`). **Windows**
+  opens one **Windows Terminal tab per member project** (`spawnProjectTabs`,
+  `wt -w 0`); each tab's script is just `launch "<project-name>"` —
+  delegating entirely to the existing single-project CLI path, so that
+  project's own defaults run together in that tab exactly like launching it
+  alone, rather than reimplementing that logic per tab. `-st`/`--script-tabs`
+  (or `x` in the TUI) drops down to per-script granularity instead (see
+  below); `-c`/`--concurrent` (or `c`) runs everything in one pane instead
+  (`spawnConcurrent`, also fed by `defaultGroupCommands()` — no project/script
+  distinction to make there, since it's one shared pane either way).
+- **Script granularity** — the `-a`/`a` ask-picker's hand-picked subset
+  *always* dispatches this way (the user already curated individual scripts,
+  possibly a partial cross-project mix, which has no clean "one tab per
+  project" regrouping), and it's also what `-st`/`x` opts the default path
+  into. Goes through the original `launchCommands()`: **Windows** opens one
+  tab per *command* (`spawnTabs`); **macOS/Linux** (and Windows with `-c`)
+  run together in one pane via `spawnConcurrent` — piped (not inherited)
+  stdio, each line tagged with a colored `[label]` prefix, one shared SIGINT
+  still kills every child.
+
+Tabs (either dispatcher) are fire-and-forget (independent processes, not
+tracked/killed from here) — when a dispatcher reports `holdsTerminal: false`,
+the caller doesn't block waiting for Ctrl-C, it just returns/exits, since
+nothing local is left running to hold open.
+
+Two non-obvious things `spawnTabs`/`spawnProjectTabs` both work around (same
+underlying mechanism, one tab per script vs one tab per project), both
+empirically verified, not assumed: **`Bun.which("wt")` reports "not found" even when `wt.exe` is on
+PATH** — a Store-installed `wt.exe` is a 0-byte MSIX "app execution alias"
+reparse point, and `Bun.which` stats the candidate (throwing `EACCES`) rather
+than checking it's executable; detection instead walks `PATH` itself with
+`accessSync(path, X_OK)`, which succeeds on the same file (`findWt`). And
+**node's `spawn()` refuses to launch that same alias even by direct absolute
+path** (throws "Executable not found in $PATH" synchronously, despite the
+file being real and accessible) — only spawning through a shell (`shell:
+true`, i.e. routed through `cmd.exe`) works, because `cmd.exe` resolves/
+launches the alias itself instead of node's own broken pre-check. That in
+turn means a tab's actual command can't safely be embedded as a string in
+`wt`'s own command line either — doing so nests three layers of Windows
+quoting (wt's argv → node's shell wrapping → cmd.exe's `/C` parsing) around
+an arbitrary user shell command that may itself contain quotes/`&`/`|`/`^`,
+which silently produced a broken command in testing. `spawnTabs` sidesteps
+all of it by writing each command to a small temp `.cmd` file
+(`writeTabScript`) and pointing the tab's `cmd.exe /k` at that file by path —
+only the file path itself ever needs quoting. `spawnProjectTabs`'s script
+(`writeProjectTabScript`) is even simpler: it's just `launch "<project-name>"`
+— one line, no user command to quote at all, since starting that project's
+own defaults together is what the re-invoked `launch` CLI already does.
 - Core: `pkg/core/launch.ts` (+ `pkg/core/manifest.ts`) · UI: `pkg/tui/launch.tsx`
   (text entry via the shared `TextPrompt` component)
 

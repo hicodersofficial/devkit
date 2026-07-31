@@ -161,7 +161,7 @@ export function CleanScreen({
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [spin, setSpin] = useState(0); // sizing spinner frame
-  const listRef = useRef<ListSelectHandle | null>(null);
+  const listRef = useRef<ListSelectHandle<Row> | null>(null);
   // `g` (on) should land the cursor on the GLOBALS section — but globals load
   // lazily, so the jump is deferred until their rows actually exist.
   const [jumpToGlobals, setJumpToGlobals] = useState(false);

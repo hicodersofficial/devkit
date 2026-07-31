@@ -17,7 +17,15 @@ import type { ReactNode } from "react";
 import { basename } from "node:path";
 import { mountScreen } from "./app";
 import { useTheme } from "./theme-context";
-import { Header, ListSelect, Confirm, Help, TextPrompt, type Binding } from "./components";
+import {
+  Header,
+  ListSelect,
+  Confirm,
+  Help,
+  TextPrompt,
+  type Binding,
+  type ListSelectHandle,
+} from "./components";
 import {
   allProjects,
   scanProjects,
@@ -40,8 +48,12 @@ import {
   suggestName,
   newId,
   newCommand,
-  resolveProject,
+  matchProject,
+  mergeProjects,
+  resolveMembers,
   startCommands,
+  launchCommands,
+  launchGrouped,
   type Command,
   type Project,
   type ScanRoot,
@@ -52,15 +64,19 @@ import {
 const HELP: Binding[] = [
   { keys: "", desc: "Move & run" },
   { keys: "j / k", desc: "move the highlight (or arrow keys)" },
-  { keys: "enter", desc: "start the project's default command(s)" },
-  { keys: "a", desc: "pick commands to run (pre-marks your last run)" },
+  { keys: "space / tab", desc: "mark several projects to launch together" },
+  { keys: "v", desc: "visual range - sweep with j/k, v again to keep" },
+  { keys: "enter", desc: "run marked projects (or the highlighted one), each in its own tab" },
+  { keys: "c", desc: "same, but concurrently in one pane (colored prefixes)" },
+  { keys: "x", desc: "same, but expand every script to its own tab" },
+  { keys: "a", desc: "pick commands to run (pre-marks your last run; s saves as default)" },
   { keys: "/", desc: "filter projects" },
   { keys: "", desc: "Organize the list" },
   { keys: "p", desc: "pin / unpin (PINNED stays on top)" },
   { keys: "[ ]", desc: "move project up / down (switches to manual sort)" },
   { keys: "o", desc: "sort: manual order or last run (recent first)" },
   { keys: "", desc: "Add, edit & remove projects" },
-  { keys: "n", desc: "add a project (auto-detect a folder or by hand)" },
+  { keys: "n", desc: "add a project (auto-detect, by hand, or combine existing ones)" },
   { keys: "e", desc: "edit (rename / defaults / commands; adopts a scanned one)" },
   { keys: "d", desc: "delete a manual project, or hide a scanned one" },
   { keys: "s", desc: "scan folders - add/remove roots, un-hide hidden projects" },
@@ -95,10 +111,13 @@ type Mode =
   | "manual-cwd"
   | "manual-more"
   | "manual-default"
+  | "group-pick"
+  | "group-name"
   | "edit"
   | "edit-rename"
   | "edit-default"
   | "edit-remove"
+  | "edit-members"
   | "delete"
   | "scan"
   | "scan-add"
@@ -107,6 +126,19 @@ type Mode =
 interface Draft {
   name: string;
   commands: Command[];
+}
+
+// What a launch resolves to: the commands to start, and which project they
+// came from (so the caller can tell an ordinary project from a group/merge —
+// see launchCommands() in core/launch.ts). `grouped`, when present, means
+// "dispatch at project granularity via launchGrouped" — set only for a plain
+// Enter/c/x launch of a group/multi-marked set from the main list; the ask
+// picker (`a`) never sets it, so its hand-picked subset keeps dispatching
+// through the flat, per-script launchCommands exactly as before.
+interface LaunchResult {
+  project: Project;
+  cmds: Command[];
+  grouped?: { members: Project[]; concurrent?: boolean; scriptTabs?: boolean };
 }
 
 interface MenuItem {
@@ -192,6 +224,7 @@ const ADD_MENU: MenuItem[] = [
   { id: "auto", label: "Auto-detect from a folder", desc: "find scripts in package.json, go.mod, Cargo.toml, pyproject.toml" },
   { id: "manual", label: "Add manually", desc: "enter a name and commands by hand" },
   { id: "scan", label: "Add a scan folder", desc: "auto-list every project under a folder" },
+  { id: "group", label: "Combine existing projects", desc: "run several together as one launchable project (e.g. a backend + its frontend)" },
 ];
 
 const EDIT_MENU: MenuItem[] = [
@@ -201,11 +234,19 @@ const EDIT_MENU: MenuItem[] = [
   { id: "back", label: "Back", desc: "return to the project list" },
 ];
 
+// Shown instead of EDIT_MENU for a group project: its commands are computed
+// live from its members, so there's no per-command default/remove to set.
+const GROUP_EDIT_MENU: MenuItem[] = [
+  { id: "rename", label: "Rename", desc: "change the group's name" },
+  { id: "members", label: "Edit members", desc: "change which projects this group combines" },
+  { id: "back", label: "Back", desc: "return to the project list" },
+];
+
 export function LaunchScreen({
   onChoose,
   initialProject = null,
 }: {
-  onChoose: (cmds: Command[] | null) => void;
+  onChoose: (result: LaunchResult | null) => void;
   /** Open straight on this project's command picker (the `a` page) instead of the
    *  project list — used by `launch <name> -a`. Esc still falls back to the list. */
   initialProject?: Project | null;
@@ -224,6 +265,13 @@ export function LaunchScreen({
   const [scanTarget, setScanTarget] = useState<ScanRoot | null>(null);
   const [draft, setDraft] = useState<Draft>({ name: "", commands: [] });
   const [pendingCmd, setPendingCmd] = useState({ label: "", command: "", cwd: "" });
+  const [pickedMembers, setPickedMembers] = useState<Project[]>([]);
+  // Imperative handle onto the main list, so `c`/`x` can read the marked set
+  // (getSelected) the same way Enter's onSubmit already receives it.
+  const listRef = useRef<ListSelectHandle<Project> | null>(null);
+  // Same, but for the ask-picker's command list — lets `s` (save as default)
+  // read the current marks without needing Enter to submit first.
+  const runListRef = useRef<ListSelectHandle<Command> | null>(null);
 
   const projects = useMemo(() => orderProjects(raw, cfg), [raw, cfg]);
 
@@ -324,7 +372,11 @@ export function LaunchScreen({
   };
 
   // Launch a set of commands for a project, remembering them as its last run.
-  const launch = (p: Project, cmds: Command[]) => {
+  const launch = (
+    p: Project,
+    cmds: Command[],
+    grouped?: { members: Project[]; concurrent?: boolean; scriptTabs?: boolean },
+  ) => {
     if (!cmds.length) return;
     const prev = cfgRef.current; // already holds any unpersisted pin/reorder/sort
     if (persistTimer.current) clearTimeout(persistTimer.current);
@@ -334,10 +386,42 @@ export function LaunchScreen({
       lastRun: { ...(prev.lastRun ?? {}), [p.id]: cmds.map((c) => c.label) },
       lastRunAt: { ...(prev.lastRunAt ?? {}), [p.id]: Date.now() },
     });
-    onChoose(cmds);
+    onChoose({ project: p, cmds, grouped });
   };
   // ---- run a project's default command(s) ----
-  const runProject = (p: Project) => launch(p, defaultCommands(p));
+  // A single group project's own defaults ALSO dispatch via launchGrouped
+  // (project tabs by default) — consistent with `launch <groupName>` on the
+  // CLI. Only the ask-picker (`a` page, below) skips this and keeps the flat
+  // per-script launchCommands, since it's already a hand-picked subset.
+  const runProject = (p: Project) => {
+    const cmds = defaultCommands(p);
+    if (p.memberIds?.length) {
+      launch(p, cmds, { members: resolveMembers(p, projects) });
+    } else {
+      launch(p, cmds);
+    }
+  };
+
+  // Launch several marked projects together (or just one, same as
+  // runProject) — the main list's Enter/c/x dispatch. `opts` is empty for
+  // Enter (project tabs by default), {concurrent:true} for `c`, or
+  // {scriptTabs:true} for `x`.
+  const launchMarked = (picked: Project[], opts: { concurrent?: boolean; scriptTabs?: boolean }) => {
+    const first = picked[0];
+    if (!first) return;
+    if (picked.length === 1) {
+      if (first.memberIds?.length) {
+        launch(first, defaultCommands(first), { members: resolveMembers(first, projects), ...opts });
+      } else {
+        // A single ordinary project: concurrent/script-tabs have nothing to
+        // apply to, so `c`/`x` behave exactly like plain Enter here.
+        runProject(first);
+      }
+      return;
+    }
+    const merged = mergeProjects(picked.map((p) => p.name).join(" + "), picked);
+    launch(merged, defaultCommands(merged), { members: picked, ...opts });
+  };
 
   // Commands to pre-mark in the `a` picker: the last run if any, else defaults.
   const lastRunIds = (p: Project) => {
@@ -346,6 +430,42 @@ export function LaunchScreen({
       ? p.commands.filter((c) => labels.includes(c.label)).map((c) => c.id)
       : [];
     return ids.length ? ids : defaultCommands(p).map((c) => c.id);
+  };
+
+  // ---- `s` in the ask-picker: persist the current marks as the project's
+  // real default commands, separate from running them. Adopts a scanned
+  // project into the config first if needed (mirrors the list's `e` key).
+  // No-op for a group/merge - its defaults live on its members, not on it.
+  const saveAsDefault = (p: Project, picked: Command[]) => {
+    if (!picked.length) return;
+    if (p.memberIds?.length) {
+      setStatus("Can't save defaults for a combined project - edit its members instead.");
+      return;
+    }
+    const pickedIds = new Set(picked.map((c) => c.id));
+    const withDefaults = (proj: Project): Project => ({
+      ...proj,
+      commands: proj.commands.map((c) => ({ ...c, isDefault: pickedIds.has(c.id) })),
+    });
+    if (p.source === "manual") {
+      const updated = withDefaults(p);
+      updateProject(updated);
+      setTarget(updated);
+      rescan();
+      setStatus(`Saved ${picked.length} command(s) as default for ${p.name}.`);
+    } else {
+      let adopted: Project | null = null;
+      structural(() => {
+        adopted = adoptProject(p);
+      });
+      if (adopted) {
+        const updated = withDefaults(adopted);
+        updateProject(updated);
+        setTarget(updated);
+        rescan();
+        setStatus(`Adopted "${updated.name}" and saved ${picked.length} command(s) as default.`);
+      }
+    }
   };
 
   // ---- help (its own full page, not an overlay) ----
@@ -362,7 +482,7 @@ export function LaunchScreen({
         <Header
           title="launch"
           subtitle={`sort: ${cfg.sortMode === "recent" ? "last run" : "manual order"}`}
-          hint="j/k move | enter run | a pick | p pin | [ ]/o sort | n/e/d project | s scan | h help"
+          hint="j/k move | space mark | enter run | c concurrent | x script-tabs | a pick | p pin | n/e/d project | h help"
         />
         {status ? <text fg={theme.green}>{status}</text> : null}
         <ListSelect
@@ -370,14 +490,13 @@ export function LaunchScreen({
           getKey={(p) => p.id}
           filterText={(p) => `${p.name} ${p.commands.map((c) => c.label).join(" ")}`}
           active={mode === "list" && !showHelp}
+          multiSelect
+          controlRef={listRef}
           onReorder={reorderUI}
           sectionOf={(p) => (p.pinned ? "pinned" : (p.source ?? "manual"))}
           sectionLabel={(id) => sectionHeader(id, nameWidth)}
           emptyText="No projects yet - press n to add one, or s to add a scan folder."
-          onSubmit={(items) => {
-            const p = items[0];
-            if (p) runProject(p);
-          }}
+          onSubmit={(items) => launchMarked(items, {})}
           onCancel={() => {
             flushPersist();
             onChoose(null);
@@ -394,6 +513,14 @@ export function LaunchScreen({
               go("add");
             } else if (name === "s") {
               go("scan");
+            } else if (name === "c") {
+              launchMarked(listRef.current?.getSelected() ?? (current ? [current] : []), {
+                concurrent: true,
+              });
+            } else if (name === "x") {
+              launchMarked(listRef.current?.getSelected() ?? (current ? [current] : []), {
+                scriptTabs: true,
+              });
             } else if (name === "a" && current) {
               setTarget(current);
               go("run");
@@ -464,7 +591,7 @@ export function LaunchScreen({
     return (
       <Frame
         title={`run: ${target.name}`}
-        hint={`space/tab select | enter run | q/esc back${remembered ? " | last run pre-selected" : ""}`}
+        hint={`space/tab select | enter run | s save as default | q/esc back${remembered ? " | last run pre-selected" : ""}`}
       >
         <ListSelect
           items={cmds}
@@ -472,12 +599,16 @@ export function LaunchScreen({
           filterText={(c) => `${c.label} ${c.command}`}
           multiSelect
           immediateCancel
+          controlRef={runListRef}
           initialMarked={preMarked}
           sectionOf={mixed ? (c) => (c.isDefault ? "default" : "other") : undefined}
           sectionLabel={(id) => (id === "default" ? "DEFAULT" : "OTHER")}
           emptyText="This project has no commands."
           onSubmit={(cmds) => launch(target, cmds)}
           onCancel={() => go("list")}
+          onExtraKey={(name) => {
+            if (name === "s") saveAsDefault(target, runListRef.current?.getSelected() ?? []);
+          }}
           renderRow={(c, { selected }) => <CommandRow c={c} selected={selected} />}
         />
       </Frame>
@@ -503,10 +634,64 @@ export function LaunchScreen({
               go("manual-name");
             } else if (choice === "scan") {
               go("scan-add");
+            } else if (choice === "group") {
+              setPickedMembers([]);
+              go("group-pick");
             }
           }}
           onCancel={() => go("list")}
           renderRow={(m, { selected }) => <MenuRow m={m} selected={selected} />}
+        />
+      </Frame>
+    );
+  }
+
+  // ---- combine projects into a group flow ----
+  if (mode === "group-pick") {
+    const candidates = projects.filter((p) => !p.memberIds?.length);
+    return (
+      <Frame title="pick projects to combine" hint="space/tab toggle | enter keep | q/esc back">
+        <ListSelect
+          items={candidates}
+          getKey={(p) => p.id}
+          filterText={(p) => p.name}
+          multiSelect
+          immediateCancel
+          emptyText="No standalone projects to combine yet."
+          onSubmit={(picked) => {
+            setPickedMembers(picked);
+            go("group-name");
+          }}
+          onCancel={() => go("add")}
+          renderRow={(p, { selected }) => (
+            <ProjectRow p={p} selected={selected} nameWidth={nameWidth} />
+          )}
+        />
+      </Frame>
+    );
+  }
+
+  if (mode === "group-name") {
+    return (
+      <Frame title="group name">
+        <TextPrompt
+          key={promptKey}
+          label="Group project name"
+          placeholder="e.g. sustainatrix"
+          onSubmit={(name) => {
+            const trimmed = name.trim() || "group";
+            addProject({
+              id: newId(),
+              name: trimmed,
+              commands: [],
+              memberIds: pickedMembers.map((p) => p.id),
+            });
+            rescan();
+            setStatus(`Combined ${pickedMembers.length} projects into "${trimmed}".`);
+            setPickedMembers([]);
+            go("list");
+          }}
+          onCancel={() => go("group-pick")}
         />
       </Frame>
     );
@@ -715,10 +900,11 @@ export function LaunchScreen({
 
   // ---- edit flow ----
   if (mode === "edit" && target) {
+    const isGroup = !!target.memberIds?.length;
     return (
       <Frame title={`edit: ${target.name}`} hint="enter choose | q/esc back">
         <ListSelect
-          items={EDIT_MENU}
+          items={isGroup ? GROUP_EDIT_MENU : EDIT_MENU}
           getKey={(m) => m.id}
           filterText={(m) => m.label}
           immediateCancel
@@ -727,6 +913,7 @@ export function LaunchScreen({
             if (choice === "rename") go("edit-rename");
             else if (choice === "default") go("edit-default");
             else if (choice === "remove") go("edit-remove");
+            else if (choice === "members") go("edit-members");
             else go("list");
           }}
           onCancel={() => go("list")}
@@ -808,6 +995,34 @@ export function LaunchScreen({
           }}
           onCancel={() => go("edit")}
           renderRow={(c, { selected }) => <CommandRow c={c} selected={selected} />}
+        />
+      </Frame>
+    );
+  }
+
+  if (mode === "edit-members" && target) {
+    const candidates = projects.filter((p) => p.id !== target.id && !p.memberIds?.length);
+    return (
+      <Frame title={`${target.name} - edit members`} hint="space/tab toggle | enter save | q/esc back">
+        <ListSelect
+          items={candidates}
+          getKey={(p) => p.id}
+          filterText={(p) => p.name}
+          multiSelect
+          immediateCancel
+          initialMarked={target.memberIds ?? []}
+          emptyText="No standalone projects available."
+          onSubmit={(picked) => {
+            const updated = { ...target, memberIds: picked.map((p) => p.id) };
+            updateProject(updated); // normalizeForSave resets commands for us
+            setTarget(updated);
+            rescan();
+            go("edit");
+          }}
+          onCancel={() => go("edit")}
+          renderRow={(p, { selected }) => (
+            <ProjectRow p={p} selected={selected} nameWidth={nameWidth} />
+          )}
         />
       </Frame>
     );
@@ -950,17 +1165,77 @@ function Frame({
 // Mount the picker; on a real selection, hand the terminal to the dev servers and
 // hold it (so a caller's loop can't redraw over the logs); on cancel, return so the
 // caller (e.g. the devkit hub) can show its menu again. Pass `initialProject` to
-// open straight on that project's command picker (the `a` page).
-export async function runLaunchScreen(initialProject: Project | null = null) {
-  const chosen = await mountScreen<Command[] | null>((done) => (
+// open straight on that project's command picker (the `a` page). `opts.concurrent`
+// only matters for a group project (see launchCommands in core/launch.ts) — an
+// ordinary project always uses startCommands, unchanged.
+export async function runLaunchScreen(
+  initialProject: Project | null = null,
+  opts?: { concurrent?: boolean },
+) {
+  const chosen = await mountScreen<LaunchResult | null>((done) => (
     <LaunchScreen onChoose={done} initialProject={initialProject} />
   ));
-  if (!chosen || !chosen.length) return;
+  if (!chosen || !chosen.cmds.length) return;
+  const { project, cmds, grouped } = chosen;
   // Renderer is torn down by now; hand the terminal to the dev servers.
   console.log(`\nStarting ...\n`);
-  for (const c of chosen) console.log(`> ${c.label}: ${c.command}  (${c.cwd})`);
-  startCommands(chosen); // wires SIGINT -> process.exit(0)
-  await new Promise<void>(() => {}); // hold the terminal until Ctrl-C
+  for (const c of cmds) console.log(`> ${c.label}: ${c.command}  (${c.cwd})`);
+  if (grouped) {
+    // Plain Enter/c/x on a group or a marked multi-select (main list) —
+    // project granularity by default, per grouped.concurrent/scriptTabs.
+    const { holdsTerminal } = launchGrouped(grouped.members, {
+      concurrent: grouped.concurrent,
+      scriptTabs: grouped.scriptTabs,
+    });
+    if (holdsTerminal) await new Promise<void>(() => {}); // hold until Ctrl-C
+  } else if (project.memberIds?.length) {
+    // The ask picker (`a`) on a group/merge: always the flat, per-script
+    // dispatch — the user already hand-picked individual scripts here.
+    const { holdsTerminal } = launchCommands(cmds, opts);
+    if (holdsTerminal) await new Promise<void>(() => {}); // hold until Ctrl-C
+    // else: tabs were opened elsewhere — return so the caller's process.exit runs.
+  } else {
+    startCommands(cmds); // wires SIGINT -> process.exit(0)
+    await new Promise<void>(() => {}); // hold the terminal until Ctrl-C
+  }
+}
+
+function dedupeById(projects: Project[]): Project[] {
+  const seen = new Set<string>();
+  const out: Project[] = [];
+  for (const p of projects) {
+    if (!seen.has(p.id)) {
+      seen.add(p.id);
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+// Start a resolved project's defaults non-interactively. The only place that
+// distinguishes a group from an ordinary project: memberIds present -> the
+// new project-tabs/concurrent/script-tabs dispatcher; otherwise
+// startCommands(), unchanged. `members`, when given (the ad-hoc multi-name
+// path already has the real pre-merge projects), skips resolveMembers'
+// id-lookup round-trip.
+function startResolved(
+  p: Project,
+  concurrent: boolean,
+  scriptTabs: boolean,
+  ordered: Project[],
+  members?: Project[],
+) {
+  const cmds = defaultCommands(p);
+  recordLastRun(p.id, cmds.map((c) => c.label));
+  console.log(`\nStarting ${p.name} ...\n`);
+  for (const c of cmds) console.log(`> ${c.label}: ${c.command}  (${c.cwd})`);
+  if (p.memberIds?.length) {
+    const resolved = members ?? resolveMembers(p, ordered);
+    const { holdsTerminal } = launchGrouped(resolved, { concurrent, scriptTabs });
+    if (!holdsTerminal) process.exit(0);
+  } else {
+    startCommands(cmds);
+  }
 }
 
 export async function runLaunch() {
@@ -968,49 +1243,86 @@ export async function runLaunch() {
   if (argv.includes("-h") || argv.includes("--help")) {
     console.log(
       [
-        "Usage: launch [name|partial|index] [-a]",
+        "Usage: launch [name|partial|index ...] [-a] [-c] [-st]",
         "  launch                 interactive picker",
         "  launch <project>       start that project's default command(s)",
+        "  launch <a> <b> ...     fuzzy-launch multiple projects together (or one",
+        "                         saved group by name) - each project gets its own",
+        "                         Windows Terminal tab (its own defaults running",
+        "                         together in that tab, same as launching it alone),",
+        "                         or runs concurrently in one pane on macOS/Linux",
+        "                         (and on Windows with -c)",
         "  -a, --ask              pick which scripts to run instead of the",
         "                         defaults (pre-marked with your last run)",
+        "  -c, --concurrent       Windows only: run combined projects together in",
+        "                         this pane instead of opening a tab per project",
+        "                         (irrelevant on macOS/Linux, which always do this)",
+        "  -st, --script-tabs     expand every script (across every resolved",
+        "                         project) to its own tab, instead of one tab per",
+        "                         project",
         "",
         "Examples:",
         '  launch "Auth Service"  full name',
         "  launch auth            a partial name works too",
-        "  launch 1               1-based position in the list (recent sort:",
-        "                         1 = the project you opened last)",
+        "  launch 1               1-based position in the list",
         "  launch auth -a         choose the scripts for a one-off run",
+        "  launch esg auth        one tab for esg-kpi, one for auth-service",
+        "  launch esg auth -c     ...in this pane instead of separate tabs (Windows)",
+        "  launch esg auth -st    ...one tab per script instead of per project",
+        "  launch sustainatrix    launch a saved group (see 'n' > Combine projects)",
       ].join("\n"),
     );
     return;
   }
 
-  // -a / --ask: don't start the defaults, open the project's command picker.
   const ask = argv.includes("-a") || argv.includes("--ask");
-  const nameArg = argv.find((a) => !a.startsWith("-"));
+  const concurrent = argv.includes("-c") || argv.includes("--concurrent");
+  const scriptTabs = argv.includes("-st") || argv.includes("--script-tabs");
+  const names = argv.filter((a) => !a.startsWith("-"));
+  const ordered = allProjects(); // one snapshot: matching, member-resolution, and the miss list all reuse it
 
-  if (nameArg) {
-    const p = resolveProject(nameArg);
+  if (names.length === 1) {
+    const p = matchProject(names[0]!, ordered);
     if (!p) {
-      console.log(`No project matching "${nameArg}". Known projects:`);
-      allProjects().forEach((x, i) => console.log(`  ${i + 1}  ${x.name}`));
+      console.log(`No project matching "${names[0]}". Known projects:`);
+      ordered.forEach((x, i) => console.log(`  ${i + 1}  ${x.name}`));
       process.exit(1);
     }
     if (ask) {
       // Straight to that project's `a` page; it records the run and starts it.
-      await runLaunchScreen(p);
+      await runLaunchScreen(p, { concurrent });
       process.exit(0);
     }
-    const cmds = defaultCommands(p);
-    recordLastRun(p.id, cmds.map((c) => c.label));
-    console.log(`\nStarting ${p.name} ...\n`);
-    for (const c of cmds) console.log(`> ${c.label}: ${c.command}  (${c.cwd})`);
-    startCommands(cmds);
+    startResolved(p, concurrent, scriptTabs, ordered);
     return;
   }
 
-  // Bare `-a` (no project named) just opens the normal picker — `a` works there.
-  await runLaunchScreen();
+  if (names.length >= 2) {
+    const resolved: Project[] = [];
+    const misses: string[] = [];
+    for (const n of names) {
+      const p = matchProject(n, ordered);
+      if (p) resolved.push(p);
+      else misses.push(n);
+    }
+    if (misses.length) {
+      console.log(`No project matching: ${misses.map((m) => `"${m}"`).join(", ")}.`);
+      console.log("Known projects:");
+      ordered.forEach((x, i) => console.log(`  ${i + 1}  ${x.name}`));
+      process.exit(1);
+    }
+    const distinct = dedupeById(resolved);
+    const target = distinct.length === 1 ? distinct[0]! : mergeProjects(names.join(" "), distinct);
+    if (ask) {
+      await runLaunchScreen(target, { concurrent });
+      process.exit(0);
+    }
+    startResolved(target, concurrent, scriptTabs, ordered, distinct.length > 1 ? distinct : undefined);
+    return;
+  }
+
+  // Bare `-a`/`-c`/`-st` (no project named) just opens the normal picker.
+  await runLaunchScreen(null, { concurrent });
   process.exit(0);
 }
 

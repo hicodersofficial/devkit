@@ -64,10 +64,15 @@ export function windowStart(prev: number, cur: number, total: number, maxVisible
 }
 
 /** Imperative controls a parent can hold via the `controlRef` prop. */
-export interface ListSelectHandle {
+export interface ListSelectHandle<T = unknown> {
   /** Move the cursor (and viewport, via scroll-into-view) to the item with this
    *  key. No-op when the key isn't in the current (filtered) list. */
   jumpTo: (key: string) => void;
+  /** The same "effective selection" Enter would submit right now: marked ∪ any
+   *  active visual-sweep range (multiSelect only), falling back to just the
+   *  highlighted row when nothing's marked. Lets a parent bind other keys
+   *  (beyond Enter) to act on the same set — e.g. launch's `c`/`x`. */
+  getSelected: () => T[];
 }
 
 export interface ListSelectProps<T> {
@@ -105,9 +110,9 @@ export interface ListSelectProps<T> {
   emptyText?: string;
   /** Max rows to show at once; defaults to terminal height minus chrome. */
   maxVisible?: number;
-  /** Receives imperative controls (jumpTo) — a plain ref object, assigned on
-   *  every render (avoids forwardRef's poor ergonomics with generics). */
-  controlRef?: { current: ListSelectHandle | null };
+  /** Receives imperative controls (jumpTo, getSelected) — a plain ref object,
+   *  assigned on every render (avoids forwardRef's poor ergonomics with generics). */
+  controlRef?: { current: ListSelectHandle<T> | null };
 }
 
 export function ListSelect<T>(props: ListSelectProps<T>) {
@@ -212,14 +217,34 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
   const ref = useRef({ filtered, cur, filtering, anchor, marked, escArmed });
   ref.current = { filtered, cur, filtering, anchor, marked, escArmed };
 
+  // The same "what would Enter submit right now" logic, shared by submit()
+  // and the controlRef's getSelected() so both agree on one definition:
+  // marked ∪ active visual-sweep range (multiSelect only), else just the
+  // highlighted row.
+  const getEffectiveSelection = (): T[] => {
+    const { filtered: list, cur: c, anchor: a, marked: m } = ref.current;
+    if (multiSelect) {
+      const eff = new Set(m);
+      for (const k of rangeKeys(a, c, list)) eff.add(k);
+      if (eff.size) {
+        const picked = items.filter((it) => eff.has(getKey(it)) && isSelectable(it));
+        if (picked.length) return picked;
+      }
+    }
+    const item = list[c];
+    return item && isSelectable(item) ? [item] : [];
+  };
+
   // Imperative controls for the parent (e.g. clean's `g` jumping the cursor to
-  // the GLOBALS section). Reassigned each render so it closes over fresh state.
+  // the GLOBALS section; launch's `c`/`x` reading the marked set for a key
+  // besides Enter). Reassigned each render so it closes over fresh state.
   if (controlRef) {
     controlRef.current = {
       jumpTo: (key: string) => {
         const idx = ref.current.filtered.findIndex((it) => getKey(it) === key);
         if (idx >= 0) setCursor(idx);
       },
+      getSelected: getEffectiveSelection,
     };
   }
 
@@ -308,18 +333,8 @@ export function ListSelect<T>(props: ListSelectProps<T>) {
   };
 
   const submit = () => {
-    const { filtered: list, cur: c, anchor: a, marked: m } = ref.current;
-    if (multiSelect) {
-      const eff = new Set(m);
-      for (const k of rangeKeys(a, c, list)) eff.add(k);
-      if (eff.size) {
-        const picked = items.filter((it) => eff.has(getKey(it)) && isSelectable(it));
-        if (picked.length) onSubmit(picked);
-        return;
-      }
-    }
-    const item = list[c];
-    if (item && isSelectable(item)) onSubmit([item]);
+    const picked = getEffectiveSelection();
+    if (picked.length) onSubmit(picked);
   };
 
   // Pasting (bracketed paste) goes into the filter query while filtering.

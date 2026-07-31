@@ -45,6 +45,7 @@ launch my-app          # or start it straight away — by name...
 launch app             # ...a partial name...
 launch 1               # ...or its position in the list
 launch my-app -a       # choose which scripts to run this time
+launch api web         # launch two projects together, each in its own tab
 ```
 
 Point `launch` at the folders where your projects live and it finds them all
@@ -52,10 +53,16 @@ automatically — reading `package.json`, `go.mod`, `Cargo.toml`, and
 `pyproject.toml`. Press **Enter** to start a project's default command(s)
 (backend **and** frontend together, streaming logs); Ctrl-C stops everything.
 
+- **Interdependent apps?** Mark several projects (Space/Tab) and hit Enter —
+  each opens in its own Windows Terminal tab (or runs together in one pane on
+  macOS/Linux, or on Windows with `c`/`-c`). Save a combo permanently as a
+  **group** (`n` → Combine existing projects) so e.g. `launch sustainatrix`
+  always starts every app in it.
+- Press **`a`** (or pass `-a`) to launch a different combo of scripts for a
+  one-off run — it remembers your last choice, and **`s`** saves the current
+  picks as the project's real defaults.
 - **Pin** your go-to projects to the top.
 - **Reorder** the list however you like, or sort by what you ran most recently.
-- Press **`a`** (or pass `-a`) to launch a different combo of scripts for a one-off
-  run — it even remembers your last choice.
 - Add projects by auto-detecting a folder, or by hand.
 
 ### 🧹 Reclaim gigabytes in one sweep
